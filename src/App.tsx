@@ -12,7 +12,9 @@ type Contract = {
 }
 type Appliance = { id: string; name: string; category: string; energy: Energy; watts: number; hours: number; days: number; note: string }
 type Bill = { id: string; energy: Energy; date: string; amount: number; consumption: number; label: string; pdfId?: string; period?: string }
-type Data = { contracts: Contract[]; appliances: Appliance[]; bills: Bill[]; dark: boolean }
+type MeterReading = { id:string; energy:Energy; meterId:string; date:string; index:number; unit:'kWh'|'m3'; coefficient?:number }
+type AnnualReport = { id:string; energy:Energy; year:number; consumption:number; amount:number; period:string; source:string; pdfId?:string }
+type Data = { contracts: Contract[]; appliances: Appliance[]; bills: Bill[]; meterReadings:MeterReading[]; annualReports:AnnualReport[]; dark: boolean }
 const STORAGE = 'watts-data-v1'
 const euro = (n: number) => n.toLocaleString('fr-FR', { style: 'currency', currency: 'EUR' })
 const num = (n: number) => n.toLocaleString('fr-FR', { maximumFractionDigits: 2 })
@@ -36,17 +38,17 @@ const defaultData: Data = {
     { id: uid(), name: 'Chaudière gaz', category: 'Chauffage', energy: 'gas', watts: 10000, hours: 3, days: 30, note: 'Puissance thermique indicative en watts ; approximation de durée à adapter.' },
     { id: uid(), name: 'Cuisson au gaz', category: 'Cuisine', energy: 'gas', watts: 2000, hours: 1, days: 20, note: 'Puissance thermique indicative, selon brûleur et réglage.' },
   ],
-  bills: [], dark: false,
+  bills: [], meterReadings: [], annualReports: [], dark: false,
 }
 const loadData = (): Data => {
   try {
     const raw = localStorage.getItem(STORAGE)
     if (!raw) return defaultData
     const parsed = JSON.parse(raw) as Partial<Data>
-    return { ...defaultData, ...parsed, contracts: parsed.contracts?.length ? parsed.contracts.map(c => ({ ...defaultData.contracts.find(x => x.energy === c.energy), ...c })) as Contract[] : defaultData.contracts, appliances: parsed.appliances?.length ? parsed.appliances : defaultData.appliances, bills: parsed.bills || [] }
+    return { ...defaultData, ...parsed, contracts: parsed.contracts?.length ? parsed.contracts.map(c => ({ ...defaultData.contracts.find(x => x.energy === c.energy), ...c })) as Contract[] : defaultData.contracts, appliances: parsed.appliances?.length ? parsed.appliances : defaultData.appliances, bills: parsed.bills || [], meterReadings: parsed.meterReadings || [], annualReports: parsed.annualReports || [] }
   } catch { return defaultData }
 }
-const labels: Record<string, string> = { dashboard: 'Vue d’ensemble', contracts: 'Mes contrats & factures', calculator: 'Calculer', appliances: 'Mes appareils', compare: 'Comparer', savings: 'Économiser', learn: 'Comprendre' }
+const labels: Record<string, string> = { dashboard: 'Vue d’ensemble', contracts: 'Mes contrats & factures', analysis: 'Analyser ma consommation', calculator: 'Calculer', appliances: 'Mes appareils', compare: 'Comparer', savings: 'Économiser', learn: 'Comprendre' }
 
 type StoredPdf = { id: string; name: string; addedAt: string; size: number; blob: Blob }
 const PDF_DB = 'watts-pdf-library'
@@ -83,6 +85,9 @@ export default function App() {
   const [pdfDocs, setPdfDocs] = useState<Omit<StoredPdf,'blob'>[]>([])
   const [pendingPdfId, setPendingPdfId] = useState<string | undefined>()
   const [showContractForm, setShowContractForm] = useState<Energy | null>(null)
+  const [readingDraft,setReadingDraft]=useState({energy:'electricity' as Energy,meterId:'Compteur principal',date:new Date().toISOString().slice(0,10),index:'',unit:'kWh' as 'kWh'|'m3',coefficient:'11.2'})
+  const [annualDraft,setAnnualDraft]=useState({energy:'electricity' as Energy,year:String(new Date().getFullYear()-1),consumption:'',amount:'',period:'Année civile',source:'Saisie manuelle'})
+  const annualFileRef=useRef<HTMLInputElement>(null)
 
   useEffect(() => { localStorage.setItem(STORAGE, JSON.stringify(data)) }, [data])
   useEffect(() => { listPdfs().then(setPdfDocs).catch(() => notify('Bibliothèque PDF indisponible.')) }, [])
@@ -142,8 +147,8 @@ export default function App() {
       const energy:Energy=/gaz|m3|m³/i.test(lower)&&!/électricité/i.test(lower)?'gas':'electricity'
       const money = (value:string) => value.replace(/\\s/g,'').replace(/€/g,'').replace(',','.')
       const amountPatterns = [
-        /(?:total\\s*(?:ttc)?|montant\\s*(?:total)?\\s*ttc|total à payer|net à payer)[^\\d]{0,70}(\\d[\\d\\s]*(?:[,.]\\d{2}))/i,
-        /(?:montant de votre facture)[^\\d]{0,50}(\\d[\\d\\s]*(?:[,.]\\d{2}))/i
+        /(?:total\\s*(?:ttc)?|montant\\s*(?:total)?\\s*ttc|total à payer|net à payer)[^\\d]{0,70}(-?\\d[\\d\\s]*(?:[,.]\\d{2})|\\(\\s*\\d[\\d\\s]*(?:[,.]\\d{2})\\s*\\))/i,
+        /(?:montant de votre facture)[^\\d]{0,50}(-?\\d[\\d\\s]*(?:[,.]\\d{2})|\\(\\s*\\d[\\d\\s]*(?:[,.]\\d{2})\\s*\\))/i
       ]
       const consumptionPatterns = energy==='electricity'
         ? [/(?:consommation totale|total consommation|énergie consommée|consommation facturée)[^\\d]{0,90}(\\d[\\d\\s]*(?:[,.]\\d+)?)\\s*kwh/i,/(\\d[\\d\\s]*(?:[,.]\\d+)?)\\s*kwh[^\\n]{0,35}(?:consommation|total)/i]
@@ -168,7 +173,7 @@ export default function App() {
   const addBill = () => {
     const amount = Number(billDraft.amount.replace(',', '.'))
     const consumption = Number(billDraft.consumption.replace(',', '.'))
-    if (!billDraft.amount || amount < 0 || !billDraft.consumption || consumption < 0) { notify('Renseignez un montant et une consommation valides.'); return }
+    if (!billDraft.amount.trim() || !Number.isFinite(amount) || !billDraft.consumption.trim() || !Number.isFinite(consumption) || consumption < 0) { notify('Renseignez un montant valide et une consommation positive ou nulle.'); return }
     setData(d => ({ ...d, bills: [{ id: uid(), energy: billDraft.energy, date: billDraft.date, amount, consumption, label: billDraft.label || 'Facture', pdfId: pendingPdfId, period: billDraft.period }, ...d.bills] }))
     setBillDraft(v => ({ ...v, amount: '', consumption: '', label: '', period: '' })); setExtracted(''); setPendingPdfId(undefined); notify('Facture ajoutée à votre historique.')
   }
@@ -188,6 +193,9 @@ export default function App() {
     setData(d => ({ ...d, appliances: d.appliances.some(a => a.id === editing.id) ? d.appliances.map(a => a.id === editing.id ? editing : a) : [...d.appliances, editing] }))
     setEditing(null); notify('Appareil enregistré.')
   }
+  const addReading=()=>{const index=Number(readingDraft.index.replace(',','.'));if(!readingDraft.index.trim()||!Number.isFinite(index)||index<0){notify('Saisissez un index valide.');return}setData(d=>({...d,meterReadings:[...d.meterReadings,{id:uid(),energy:readingDraft.energy,meterId:readingDraft.meterId.trim()||'Compteur principal',date:readingDraft.date,index,unit:readingDraft.unit,coefficient:readingDraft.unit==='m3'?Number(readingDraft.coefficient.replace(',','.')):undefined}]}));setReadingDraft(v=>({...v,index:''}));notify('Relevé enregistré.')}
+  const addAnnual=()=>{const consumption=Number(annualDraft.consumption.replace(',','.')),amount=annualDraft.amount.trim()?Number(annualDraft.amount.replace(',','.')):0,year=Number(annualDraft.year);if(!Number.isFinite(consumption)||consumption<0||!Number.isInteger(year)||year<2000||year>2100||!Number.isFinite(amount)){notify('Vérifiez l’année et les valeurs saisies.');return}setData(d=>({...d,annualReports:[...d.annualReports,{id:uid(),energy:annualDraft.energy,year,consumption,amount,period:annualDraft.period,source:annualDraft.source}]}));setAnnualDraft(v=>({...v,consumption:'',amount:''}));notify('Bilan annuel ajouté.')}
+  const importAnnualPdf=async(file?:File)=>{if(!file)return;try{const buffer=await file.arrayBuffer(),pdf=await pdfjsLib.getDocument({data:buffer}).promise;let text='';for(let i=1;i<=Math.min(pdf.numPages,20);i++){const page=await pdf.getPage(i);const content=await page.getTextContent();text+=' '+content.items.map((x:any)=>x.str).join(' ')}const kwh=text.match(/([\d\s.,]+)\s*kWh/i),year=text.match(/20\d{2}/),amount=text.match(/([\d\s.,]+)\s*€/);setAnnualDraft(v=>({...v,year:year?.[0]||v.year,consumption:kwh?.[1].replace(/\s/g,'').replace(',','.')||v.consumption,amount:amount?.[1].replace(/\s/g,'').replace(',','.')||v.amount,source:file.name}));const id=await savePdf(file);setPdfDocs(v=>[{id,name:file.name,addedAt:new Date().toISOString(),size:file.size},...v]);setExtracted('Bilan annuel analysé à titre indicatif. Les champs ont été préremplis lorsque des valeurs ont été reconnues. Vérifiez-les avant de cliquer sur « Ajouter le bilan ».');notify('PDF analysé : vérifiez les données détectées.')}catch{notify('Lecture du PDF impossible. Saisissez les données manuellement.')}finally{if(annualFileRef.current)annualFileRef.current.value=''}}
   const nav = (id: string) => { setPage(id); window.scrollTo({ top: 0, behavior: 'smooth' }) }
   const appCost = (a: Appliance) => a.watts / 1000 * a.hours * a.days * contract(a.energy).price
   const selectedA = data.appliances.find(a => a.name === compareA) || data.appliances[0]
@@ -210,7 +218,7 @@ export default function App() {
     <aside className="sidebar">
       <button className="brand" onClick={() => nav('dashboard')}><span className="brand-mark">W</span><span>WATTS<small>MAÎTRISER SON ÉNERGIE</small></span></button>
       <div className="side-label">ESPACE PERSONNEL</div>
-      {Object.entries(labels).map(([id, label]) => <button key={id} className={`nav-item ${page === id ? 'active' : ''}`} onClick={() => nav(id)}><span className="nav-icon">{({dashboard:'⌂',contracts:'▤',calculator:'∑',appliances:'▦',compare:'⇄',savings:'↗',learn:'✳'} as Record<string,string>)[id]}</span>{label}</button>)}
+      {Object.entries(labels).map(([id, label]) => <button key={id} className={`nav-item ${page === id ? 'active' : ''}`} onClick={() => nav(id)}><span className="nav-icon">{({dashboard:'⌂',contracts:'▤',analysis:'▥',calculator:'∑',appliances:'▦',compare:'⇄',savings:'↗',learn:'✳'} as Record<string,string>)[id]}</span>{label}</button>)}
       <div className="sidebar-bottom"><div className="privacy"><span>●</span><div><b>Vos données restent ici</b><small>Stockage sur cet appareil</small></div></div><button className="theme-toggle" onClick={() => setData(d => ({ ...d, dark: !d.dark }))}>{data.dark ? '☀ Mode clair' : '☾ Mode sombre'}</button></div>
     </aside>
     <main className="main">
@@ -243,7 +251,7 @@ export default function App() {
           <div className="bill-form">
             <select value={billDraft.energy} onChange={e => setBillDraft(v => ({...v, energy:e.target.value as Energy}))}><option value="electricity">Électricité</option><option value="gas">Gaz</option></select>
             <input type="date" value={billDraft.date} onChange={e => setBillDraft(v => ({...v,date:e.target.value}))}/>
-            <input placeholder="Montant TTC (€)" value={billDraft.amount} onChange={e => setBillDraft(v => ({...v,amount:e.target.value}))}/>
+            <label className="field"><span>Montant TTC (€)</span><input placeholder="Ex. 125,40 ou -32,50" inputMode="decimal" value={billDraft.amount} onChange={e => setBillDraft(v => ({...v,amount:e.target.value}))}/><small>Un montant négatif correspond à un avoir ou une régularisation en votre faveur.</small></label>
             <input placeholder="Consommation (kWh)" value={billDraft.consumption} onChange={e => setBillDraft(v => ({...v,consumption:e.target.value}))}/>
             <input placeholder="Période (ex. 01/10 au 31/10)" value={billDraft.period} onChange={e => setBillDraft(v => ({...v,period:e.target.value}))}/><input placeholder="Libellé / fournisseur" value={billDraft.label} onChange={e => setBillDraft(v => ({...v,label:e.target.value}))}/>
             <button className="button button-primary" onClick={addBill}>Ajouter</button>
@@ -251,6 +259,13 @@ export default function App() {
           {data.bills.length === 0 ? <Empty text="Aucune facture enregistrée. Importez un PDF ou saisissez les chiffres de votre facture ci-dessus."/ > : <div className="table-wrap"><table><thead><tr><th>Date</th><th>Période</th><th>Énergie</th><th>Libellé</th><th>Consommation</th><th>Montant</th><th/></tr></thead><tbody>{data.bills.map(b => <tr key={b.id}><td>{new Date(b.date+'T12:00:00').toLocaleDateString('fr-FR')}</td><td>{b.period || '—'}</td><td><span className={`energy-dot ${b.energy}`}/>{energyName(b.energy)}</td><td>{b.label}</td><td>{num(b.consumption)} kWh</td><td><b>{euro(b.amount)}</b></td><td><button className="delete-button" onClick={() => setData(d => ({...d,bills:d.bills.filter(x=>x.id!==b.id)}))}>×</button></td></tr>)}</tbody></table></div>}
         </section>
         <section className="panel privacy-panel"><span className="privacy-symbol">▣</span><div><b>Vos documents restent privés</b><p className="muted">Le PDF est lu dans votre navigateur. Il n’est pas envoyé à un serveur. Seules les données que vous validez sont conservées dans le stockage local de cet appareil.</p></div></section>
+      </div>}
+
+      {page === 'analysis' && <div className="page-content">
+        <div className="section-heading"><div><span className="eyebrow">HISTORIQUE ÉNERGÉTIQUE</span><h2>Vos consommations dans le temps</h2><p className="muted">Croisez les bilans fournisseurs et les index réels de vos compteurs. Les données restent sur cet appareil.</p></div></div>
+        <section className="panel"><div className="panel-head"><div><span className="eyebrow">1 · RELEVÉS DE COMPTEURS</span><h3>Enregistrer un index</h3></div><span className="pill">{data.meterReadings.length} relevé(s)</span></div><div className="bill-form"><select value={readingDraft.energy} onChange={e=>setReadingDraft(v=>({...v,energy:e.target.value as Energy,unit:e.target.value==='gas'?'m3':'kWh'}))}><option value="electricity">Électricité</option><option value="gas">Gaz</option></select><input value={readingDraft.meterId} onChange={e=>setReadingDraft(v=>({...v,meterId:e.target.value}))} placeholder="Nom du compteur"/><input type="date" value={readingDraft.date} onChange={e=>setReadingDraft(v=>({...v,date:e.target.value}))}/><input inputMode="decimal" placeholder={`Index (${readingDraft.unit})`} value={readingDraft.index} onChange={e=>setReadingDraft(v=>({...v,index:e.target.value}))}/>{readingDraft.unit==='m3'&&<input inputMode="decimal" placeholder="Coefficient kWh/m³" value={readingDraft.coefficient} onChange={e=>setReadingDraft(v=>({...v,coefficient:e.target.value}))}/>}<button className="button button-primary" onClick={addReading}>Enregistrer l’index</button></div><p className="hint">Pour le gaz, le volume entre deux relevés est converti en kWh avec le coefficient indiqué. Saisissez plusieurs relevés sur le même compteur pour calculer les écarts.</p>{data.meterReadings.length>0&&<div className="table-wrap"><table><thead><tr><th>Date</th><th>Compteur</th><th>Énergie</th><th>Index</th><th>Écart depuis le relevé précédent</th><th/></tr></thead><tbody>{[...data.meterReadings].sort((a,b)=>a.date.localeCompare(b.date)).map((r,i,arr)=>{const prev=[...arr.slice(0,i)].reverse().find(x=>x.energy===r.energy&&x.meterId===r.meterId&&x.unit===r.unit);const delta=prev?Math.max(0,r.index-prev.index)*(r.unit==='m3'?(r.coefficient||11.2):1):null;return <tr key={r.id}><td>{new Date(r.date+'T12:00:00').toLocaleDateString('fr-FR')}</td><td>{r.meterId}</td><td>{energyName(r.energy)}</td><td>{num(r.index)} {r.unit}</td><td>{delta===null?'Premier relevé':`${num(delta)} kWh`}</td><td><button className="delete-button" onClick={()=>setData(d=>({...d,meterReadings:d.meterReadings.filter(x=>x.id!==r.id)}))}>×</button></td></tr>})}</tbody></table></div>}</section>
+        <section className="panel"><div className="panel-head"><div><span className="eyebrow">2 · BILANS ANNUELS FOURNISSEUR</span><h3>Ajouter un bilan annuel</h3></div><button className="button button-outline" onClick={()=>annualFileRef.current?.click()}>Importer un PDF</button><input ref={annualFileRef} hidden type="file" accept="application/pdf,.pdf" onChange={e=>importAnnualPdf(e.target.files?.[0])}/></div><div className="bill-form"><select value={annualDraft.energy} onChange={e=>setAnnualDraft(v=>({...v,energy:e.target.value as Energy}))}><option value="electricity">Électricité</option><option value="gas">Gaz</option></select><input type="number" min="2000" max="2100" value={annualDraft.year} onChange={e=>setAnnualDraft(v=>({...v,year:e.target.value}))} placeholder="Année"/><input inputMode="decimal" value={annualDraft.consumption} onChange={e=>setAnnualDraft(v=>({...v,consumption:e.target.value}))} placeholder="Consommation annuelle (kWh)"/><input inputMode="decimal" value={annualDraft.amount} onChange={e=>setAnnualDraft(v=>({...v,amount:e.target.value}))} placeholder="Montant annuel (€), facultatif"/><input value={annualDraft.period} onChange={e=>setAnnualDraft(v=>({...v,period:e.target.value}))} placeholder="Période"/><button className="button button-primary" onClick={addAnnual}>Ajouter le bilan</button></div>{data.annualReports.length===0?<Empty text="Aucun bilan annuel. Importez un PDF ou saisissez les chiffres du récapitulatif fournisseur."/>:<div className="table-wrap"><table><thead><tr><th>Année</th><th>Énergie</th><th>Consommation</th><th>Montant</th><th>Période / source</th><th/></tr></thead><tbody>{[...data.annualReports].sort((a,b)=>b.year-a.year).map(r=><tr key={r.id}><td>{r.year}</td><td>{energyName(r.energy)}</td><td><b>{num(r.consumption)} kWh</b></td><td>{r.amount?euro(r.amount):'—'}</td><td>{r.period} · {r.source}</td><td><button className="delete-button" onClick={()=>setData(d=>({...d,annualReports:d.annualReports.filter(x=>x.id!==r.id)}))}>×</button></td></tr>)}</tbody></table></div>}</section>
+        <section className="panel"><span className="eyebrow">3 · COMPARAISON ANNUELLE</span><h3>Évolution de vos consommations</h3>{(['electricity','gas'] as Energy[]).map(e=>{const rows=data.annualReports.filter(r=>r.energy===e).sort((a,b)=>a.year-b.year);return <div key={e} style={{marginTop:18}}><b>{energyName(e)}</b>{rows.length===0?<p className="muted small">Ajoutez des bilans annuels pour afficher l’évolution.</p>:rows.map((r,i)=>{const prev=rows[i-1],pct=prev?(r.consumption-prev.consumption)/prev.consumption*100:null;return <div className="annual-bar-row" key={r.id}><span>{r.year}</span><div className="annual-track"><div className="annual-fill" style={{width:`${Math.max(2,r.consumption/Math.max(...rows.map(x=>x.consumption),1)*100)}%`}}/></div><b>{num(r.consumption)} kWh</b><small>{pct===null?'Référence':`${pct>0?'+':''}${num(pct)} %`}</small></div>})}</div>})}<p className="hint">Les bilans annuels et les écarts d’index sont présentés séparément : ils ne sont jamais additionnés, afin d’éviter le double comptage. Une comparaison n’est pertinente que pour des périodes et périmètres comparables.</p></section>
       </div>}
 
       {page === 'calculator' && <div className="page-content">

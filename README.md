@@ -58,3 +58,16 @@ Saisie des six tarifs Tempo (bleu/blanc/rouge, heures pleines/creuses). La coule
 - Les données détectées sont reportées dans le formulaire pour vérification et correction avant validation.
 - Le PDF est archivé localement dans IndexedDB et peut être rouvert depuis la bibliothèque.
 - Les factures scannées (images) ne sont pas reconnues par OCR : les champs doivent alors être complétés manuellement.
+\n- Les montants de facture négatifs sont acceptés pour enregistrer les avoirs et régularisations en faveur du client. La consommation reste positive ou nulle.\n
+## WATTS 1.3 – Analyse de la consommation
+
+Cette évolution ajoute une rubrique « Analyser ma consommation » :
+- relevés d'index datés pour plusieurs compteurs, avec calcul de l'écart entre deux relevés successifs du même compteur ;
+- conversion indicative du gaz en kWh à partir du coefficient saisi ;
+- saisie de bilans annuels et préremplissage indicatif depuis un PDF fournisseur (texte PDF uniquement, sans OCR) ;
+- comparaison annuelle en kWh et en pourcentage ;
+- stockage local dans la sauvegarde JSON.
+
+Les bilans annuels et les écarts de compteurs restent séparés pour éviter le double comptage. Les extractions PDF doivent être vérifiées. Les anciens fichiers de sauvegarde restent compatibles : les nouvelles collections sont initialisées vides si elles sont absentes.
+
+Pour publier sur GitHub Pages, remplacez les fichiers du projet par ceux de cette archive en conservant le dossier `.github/workflows` déjà présent dans votre dépôt.
