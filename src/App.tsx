@@ -11,7 +11,7 @@ type Contract = {
   subscription: number; power: string; gasCoefficient: number; hpHc: boolean; updated: string
 }
 type Appliance = { id: string; name: string; category: string; energy: Energy; watts: number; hours: number; days: number; note: string }
-type Bill = { id: string; energy: Energy; date: string; amount: number; consumption: number; label: string }
+type Bill = { id: string; energy: Energy; date: string; amount: number; consumption: number; label: string; pdfId?: string }
 type Data = { contracts: Contract[]; appliances: Appliance[]; bills: Bill[]; dark: boolean }
 const STORAGE = 'watts-data-v1'
 const euro = (n: number) => n.toLocaleString('fr-FR', { style: 'currency', currency: 'EUR' })
@@ -48,6 +48,14 @@ const loadData = (): Data => {
 }
 const labels: Record<string, string> = { dashboard: 'Vue d’ensemble', contracts: 'Mes contrats & factures', calculator: 'Calculer', appliances: 'Mes appareils', compare: 'Comparer', savings: 'Économiser', learn: 'Comprendre' }
 
+type StoredPdf = { id: string; name: string; addedAt: string; size: number; blob: Blob }
+const PDF_DB = 'watts-pdf-library'
+function openPdfDb(): Promise<IDBDatabase> { return new Promise((resolve,reject)=>{ const r=indexedDB.open(PDF_DB,1); r.onupgradeneeded=()=>{if(!r.result.objectStoreNames.contains('documents'))r.result.createObjectStore('documents',{keyPath:'id'})}; r.onsuccess=()=>resolve(r.result); r.onerror=()=>reject(r.error) }) }
+async function savePdf(file:File):Promise<string>{const db=await openPdfDb(),id=uid();await new Promise<void>((resolve,reject)=>{const tx=db.transaction('documents','readwrite');tx.objectStore('documents').put({id,name:file.name,addedAt:new Date().toISOString(),size:file.size,blob:file});tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error)});db.close();return id}
+async function listPdfs():Promise<Omit<StoredPdf,'blob'>[]>{const db=await openPdfDb();const a=await new Promise<StoredPdf[]>((resolve,reject)=>{const r=db.transaction('documents','readonly').objectStore('documents').getAll();r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});db.close();return a.map(({blob,...v})=>v)}
+async function getPdf(id:string):Promise<StoredPdf|undefined>{const db=await openPdfDb();const a=await new Promise<StoredPdf|undefined>((resolve,reject)=>{const r=db.transaction('documents','readonly').objectStore('documents').get(id);r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});db.close();return a}
+async function deletePdf(id:string):Promise<void>{const db=await openPdfDb();await new Promise<void>((resolve,reject)=>{const tx=db.transaction('documents','readwrite');tx.objectStore('documents').delete(id);tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error)});db.close()}
+
 export default function App() {
   const [data, setData] = useState<Data>(loadData)
   const [page, setPage] = useState('dashboard')
@@ -72,9 +80,12 @@ export default function App() {
   const fileRef = useRef<HTMLInputElement>(null)
   const [extracted, setExtracted] = useState('')
   const [pdfBusy, setPdfBusy] = useState(false)
+  const [pdfDocs, setPdfDocs] = useState<Omit<StoredPdf,'blob'>[]>([])
+  const [pendingPdfId, setPendingPdfId] = useState<string | undefined>()
   const [showContractForm, setShowContractForm] = useState<Energy | null>(null)
 
   useEffect(() => { localStorage.setItem(STORAGE, JSON.stringify(data)) }, [data])
+  useEffect(() => { listPdfs().then(setPdfDocs).catch(() => notify('Bibliothèque PDF indisponible.')) }, [])
   useEffect(() => { document.documentElement.dataset.theme = data.dark ? 'dark' : 'light' }, [data.dark])
   useEffect(() => {
     let alive = true
@@ -124,37 +135,30 @@ export default function App() {
     setPdfBusy(true); setExtracted('')
     try {
       const bytes = await file.arrayBuffer()
-      const pdf = await pdfjsLib.getDocument({ data: bytes }).promise
+      const pdf = await pdfjsLib.getDocument({ data: bytes.slice(0) }).promise
       let text = ''
-      for (let i = 1; i <= Math.min(pdf.numPages, 12); i++) {
-        const page = await pdf.getPage(i)
-        const content = await page.getTextContent()
-        text += content.items.map((item: any) => item.str || '').join(' ') + '\n'
-      }
-      setExtracted(text.trim() || 'Aucun texte exploitable trouvé. Le document est peut-être un scan : saisissez les valeurs manuellement.')
-      const lower = text.toLowerCase()
-      const foundPrice = text.match(/(\d+[,.]\d{2,4})\s*€?\s*(?:\/\s*kwh|€\s*\/\s*kwh|par\s*kwh)/i)
-      const foundAmount = text.match(/(?:total\s*(?:ttc)?|montant\s*(?:total)?)[^\d]{0,30}(\d{1,4}[,.]\d{2})/i)
-      const guessedEnergy: Energy = /gaz|m3|m³/i.test(lower) && !/électricité/i.test(lower) ? 'gas' : 'electricity'
-      setBillDraft(v => ({ ...v, energy: guessedEnergy, label: file.name, amount: foundAmount?.[1]?.replace(',', '.') || v.amount }))
-      if (foundPrice) {
-        const p = Number(foundPrice[1].replace(',', '.'))
-        if (p > 0 && p < 5) updateContract(guessedEnergy, { price: p })
-      }
-      notify('PDF lu localement. Vérifiez les données extraites.')
-    } catch (err) {
-      setExtracted('Lecture impossible. Vous pouvez tout de même saisir les données de la facture manuellement.')
-      notify('Impossible de lire ce PDF.')
-    } finally { setPdfBusy(false); if (fileRef.current) fileRef.current.value = '' }
+      for (let i=1;i<=Math.min(pdf.numPages,20);i++){const page=await pdf.getPage(i);const content=await page.getTextContent();text+=content.items.map((item:any)=>item.str||'').join(' ')+'\\n'}
+      const lower=text.toLowerCase()
+      const amount=text.match(/(?:total\\s*(?:ttc)?|montant\\s*(?:total)?|total à payer)[^\\d]{0,40}(\\d{1,5}[,.]\\d{2})/i)
+      const consumption=text.match(/(?:consommation|énergie consommée|total consommé)[^\\d]{0,50}(\\d{1,7}(?:[,.]\\d+)?)\\s*kwh/i)
+      const energy:Energy=/gaz|m3|m³/i.test(lower)&&!/électricité/i.test(lower)?'gas':'electricity'
+      const id=await savePdf(file);setPdfDocs(v=>[{id,name:file.name,addedAt:new Date().toISOString(),size:file.size},...v]);setPendingPdfId(id)
+      setBillDraft(v=>({...v,energy,label:file.name,amount:amount?.[1]?.replace(',','.')||v.amount,consumption:consumption?.[1]?.replace(',','.')||v.consumption}))
+      setExtracted(text.trim()||'Aucun texte exploitable. Le PDF est conservé, mais il peut s’agir d’un scan : saisissez les valeurs manuellement.')
+      notify('PDF conservé. Vérifiez les données détectées avant validation.')
+    } catch {setExtracted('Lecture impossible. Vous pouvez saisir les données manuellement.');notify('Impossible de lire ou conserver ce PDF.')}
+    finally {setPdfBusy(false);if(fileRef.current)fileRef.current.value=''}
   }
 
   const addBill = () => {
     const amount = Number(billDraft.amount.replace(',', '.'))
     const consumption = Number(billDraft.consumption.replace(',', '.'))
     if (!billDraft.amount || amount < 0 || !billDraft.consumption || consumption < 0) { notify('Renseignez un montant et une consommation valides.'); return }
-    setData(d => ({ ...d, bills: [{ id: uid(), energy: billDraft.energy, date: billDraft.date, amount, consumption, label: billDraft.label || 'Facture' }, ...d.bills] }))
-    setBillDraft(v => ({ ...v, amount: '', consumption: '', label: '' })); setExtracted(''); notify('Facture ajoutée à votre historique.')
+    setData(d => ({ ...d, bills: [{ id: uid(), energy: billDraft.energy, date: billDraft.date, amount, consumption, label: billDraft.label || 'Facture', pdfId: pendingPdfId }, ...d.bills] }))
+    setBillDraft(v => ({ ...v, amount: '', consumption: '', label: '' })); setExtracted(''); setPendingPdfId(undefined); notify('Facture ajoutée à votre historique.')
   }
+  const openStoredPdf = async (id:string) => {const item=await getPdf(id);if(!item){notify('PDF introuvable.');return}const url=URL.createObjectURL(item.blob);window.open(url,'_blank','noopener');window.setTimeout(()=>URL.revokeObjectURL(url),60000)}
+  const removeStoredPdf = async (id:string) => {await deletePdf(id);setPdfDocs(v=>v.filter(x=>x.id!==id));setData(d=>({...d,bills:d.bills.map(b=>b.pdfId===id?{...b,pdfId:undefined}:b)}));notify('PDF supprimé.')}
   const exportData = () => {
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'watts-sauvegarde.json'; a.click(); URL.revokeObjectURL(url)
@@ -217,6 +221,7 @@ export default function App() {
         <div className="intro-row"><p className="muted">Enregistrez vos tarifs et abonnements pour obtenir des estimations plus proches de votre contrat. Les valeurs sont modifiables à tout moment.</p><button className="button button-primary" onClick={() => fileRef.current?.click()}>＋ Importer une facture PDF</button><input ref={fileRef} hidden type="file" accept="application/pdf,.pdf" onChange={e => importPdf(e.target.files?.[0])}/></div>
         {pdfBusy && <div className="notice">Lecture du PDF en cours, directement dans votre navigateur…</div>}
         {extracted && <section className="panel"><div className="panel-head"><h3>Texte extrait du PDF</h3><button className="text-button" onClick={() => setExtracted('')}>Fermer</button></div><p className="muted small">Vérifiez les informations : l’extraction est indicative et peut être incomplète.</p><pre className="extracted">{extracted.slice(0, 6000)}</pre></section>}
+        <section className="panel pdf-library"><div className="panel-head"><div><span className="eyebrow">DOCUMENTS LOCAUX</span><h3>Ma bibliothèque de factures PDF</h3></div><span className="pill">{pdfDocs.length} document(s)</span></div>{pdfDocs.length ? <div className="pdf-list">{pdfDocs.map(doc=><div className="pdf-row" key={doc.id}><span className="pdf-icon">PDF</span><div className="pdf-meta"><b>{doc.name}</b><small>{new Date(doc.addedAt).toLocaleDateString('fr-FR')} · {(doc.size/1024).toFixed(0)} Ko</small></div><button className="text-button" onClick={()=>openStoredPdf(doc.id)}>Ouvrir</button><button className="delete-button" onClick={()=>removeStoredPdf(doc.id)}>×</button></div>)}</div>:<p className="muted small">Les factures importées apparaîtront ici et resteront sur cet appareil.</p>}</section>
         <div className="contract-grid">{(['electricity','gas'] as Energy[]).map(e => <ContractCard key={e} energy={e} contract={contract(e)} onEdit={patch => updateContract(e, patch)} onReset={() => setShowContractForm(e)}/>)}</div>
         {showContractForm && <ContractEditor energy={showContractForm} value={contract(showContractForm)} onSave={patch => { updateContract(showContractForm, patch); setShowContractForm(null); notify('Contrat mis à jour.') }} onClose={() => setShowContractForm(null)}/>}
         <section className="panel"><div className="panel-head"><div><span className="eyebrow">SUIVI DANS LE TEMPS</span><h3>Mon historique de factures</h3></div><span className="pill">{data.bills.length} entrée(s)</span></div>
