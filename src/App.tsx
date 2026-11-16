@@ -94,7 +94,7 @@ export default function App() {
     refreshTempo()
     const timer = window.setInterval(refreshTempo, 30 * 60 * 1000)
     return () => { alive = false; window.clearInterval(timer) }
-  }, [contract('electricity').tempoMode])
+  }, [data.contracts])
   const contract = (e: Energy) => data.contracts.find(c => c.energy === e) || defaultData.contracts.find(c => c.energy === e)!
   const updateContract = (e: Energy, patch: Partial<Contract>) => setData(d => ({ ...d, contracts: d.contracts.map(c => c.energy === e ? { ...c, ...patch, updated: new Date().toISOString().slice(0, 10) } : c) }))
   const notify = (s: string) => { setToast(s); window.setTimeout(() => setToast(''), 2800) }
