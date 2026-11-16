@@ -1,4 +1,4 @@
-# WATTS 1.5.1
+# WATTS 1.5.2
 
 Application web autonome pour comprendre et suivre les consommations domestiques d’électricité, de gaz et d’eau. Les données sont conservées localement dans le navigateur.
 
@@ -43,9 +43,15 @@ Remplacez les fichiers de l’application par ceux de cette archive, **mais cons
 Les montants et consommations extraits dépendent de la présentation des factures. Les calculs de coût sont des estimations et ne remplacent pas le montant total facturé, qui peut inclure abonnement, taxes, assainissement, régularisations ou reports. Vérifiez les tarifs et coefficients sur vos documents.
 
 
-### Suivi de l'eau – 1.5.1
+### Suivi de l'eau – 1.5.2
 - Décomposition par facture entre coût variable de consommation (m³) et abonnement.
 - Évolution historique du prix au m³, hors abonnement.
 - Prix au m³ et abonnement modifiables directement dans l'historique.
 - Extraction indicative du prix unitaire et de l'abonnement depuis les PDF, à vérifier.
 - Les prix historiques préremplis sont des valeurs indicatives issues des factures Veolia ; les abonnements restent à compléter lorsque non extraits.
+
+
+### Eau – 1.5.2
+- Suppression de la notion d'abonnement pour l'eau.
+- Graphique du prix au m³ recalibré sur la plage réelle des tarifs pour rendre visibles les petites variations.
+- Conversion automatique des anciennes valeurs enregistrées en €/litre vers €/m³ lors du chargement.
