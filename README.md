@@ -47,3 +47,6 @@ La conversion du gaz utilise le coefficient figurant sur la facture. À défaut,
 ## Vérifications
 
 Le build TypeScript/Vite constitue le contrôle technique principal. Vérifiez sur votre propre contrat les prix, plages horaires, abonnements et coefficients avant toute décision financière.
+
+## Option Tempo
+Saisie des six tarifs Tempo (bleu/blanc/rouge, heures pleines/creuses). La couleur du jour est récupérée via l’API publique Calendrier Tempo, qui relaie les données publiées par RTE. En cas d’indisponibilité, elle reste sélectionnable manuellement. Vérifiez les tarifs sur votre facture.
