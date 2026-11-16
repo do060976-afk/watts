@@ -219,7 +219,26 @@ export default function App() {
   }
   const importBackup = async (file?: File) => {
     if (!file) return
-    try { const parsed = JSON.parse(await file.text()); if (!parsed.contracts || !parsed.appliances) throw new Error(); setData({ ...defaultData, ...parsed, waterBills: parsed.waterBills?.length ? parsed.waterBills.map(b=>({...b,unitPrice:Number(b.unitPrice)<1?Number(b.unitPrice)*1000:Number(b.unitPrice)})) : INITIAL_WATER }); notify('Sauvegarde restaurée.') } catch { notify('Fichier de sauvegarde invalide.') }
+    try {
+      const parsed = JSON.parse(await file.text()) as Partial<Data>
+      if (!Array.isArray(parsed.contracts) || !Array.isArray(parsed.appliances)) throw new Error('Sauvegarde invalide')
+
+      // Conserve aussi un historique d'eau volontairement vide.
+      // Les anciens tarifs enregistrés en €/litre sont convertis en €/m³.
+      const waterBills: WaterBill[] = Array.isArray(parsed.waterBills)
+        ? parsed.waterBills.map((b: WaterBill) => ({
+            ...b,
+            unitPrice: Number(b.unitPrice) < 1
+              ? Number(b.unitPrice) * 1000
+              : Number(b.unitPrice),
+          }))
+        : INITIAL_WATER
+
+      setData({ ...defaultData, ...parsed, waterBills })
+      notify('Sauvegarde restaurée.')
+    } catch {
+      notify('Fichier de sauvegarde invalide.')
+    }
   }
   const addAppliance = () => setEditing({ id: uid(), name: '', category: 'Autre', energy: 'electricity', watts: 500, hours: 1, days: 30, note: '' })
   const saveAppliance = () => {
