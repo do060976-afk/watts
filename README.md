@@ -71,3 +71,13 @@ Cette évolution ajoute une rubrique « Analyser ma consommation » :
 Les bilans annuels et les écarts de compteurs restent séparés pour éviter le double comptage. Les extractions PDF doivent être vérifiées. Les anciens fichiers de sauvegarde restent compatibles : les nouvelles collections sont initialisées vides si elles sont absentes.
 
 Pour publier sur GitHub Pages, remplacez les fichiers du projet par ceux de cette archive en conservant le dossier `.github/workflows` déjà présent dans votre dépôt.
+
+
+## WATTS 1.3.1 — Extraction ciblée EDF Tempo / ENGIE Gaz
+
+- Import des bilans PDF avec détection du fournisseur et de l'énergie.
+- EDF : période annuelle, total de consommation kWh, total TTC facturé et tentative d'extraction des six postes Tempo avec index début/fin.
+- ENGIE : période, consommation en kWh, total Gaz naturel TTC et informations de conversion des index lorsqu'elles sont présentes.
+- Les soldes de régularisation et remboursements ne sont pas confondus avec le coût annuel de l'énergie.
+- Les champs restent modifiables et doivent être validés par l'utilisateur.
+- Extraction réalisée localement avec PDF.js ; pas d'envoi des factures à un serveur. Les PDF scannés nécessitent encore un OCR.
