@@ -1,8 +1,8 @@
-# WATTS 1.0
+# WATTS 1.5.0
 
-Application web autonome pour comprendre et suivre les dépenses énergétiques domestiques (électricité et gaz).
+Application web autonome pour comprendre et suivre les consommations domestiques d’électricité, de gaz et d’eau. Les données sont conservées localement dans le navigateur.
 
-## Démarrer en local
+## Démarrer
 
 ```bash
 npm install
@@ -16,68 +16,28 @@ npm run build
 npm run preview
 ```
 
-## Publier sur GitHub Pages
+## Organisation de l’application
 
-1. Créez un dépôt GitHub (par exemple `watts`).
-2. Déposez le contenu de cette archive à la racine du dépôt.
-3. Dans GitHub : **Settings → Pages → Build and deployment → Deploy from a branch**.
-4. Choisissez la branche `main`, dossier `/root`, puis enregistrez.
-5. Attendez la publication. L'application utilise des chemins relatifs pour fonctionner dans un sous-répertoire GitHub Pages.
+- **Vue d’ensemble** : indicateurs synthétiques et accès rapides.
+- **Mes contrats** : fournisseurs, offres, tarifs, abonnements, puissance et paramètres Tempo. Aucun import ni historique de factures dans cette rubrique.
+- **Analyser ma consommation** : point d’entrée unique pour importer, vérifier, enregistrer et consulter les factures d’électricité et de gaz ; bibliothèque des PDF ; bilans annuels et comparaisons. Les index ne sont pas saisis séparément : ils sont lus sur les factures.
+- **Eau** : historique semestriel Veolia, import des nouvelles factures et suivi des volumes.
+- **Calculer, Mes appareils, Comparer, Économiser, Comprendre** : outils d’estimation et d’apprentissage.
 
-## Fonctionnalités
+## Factures et extraction PDF
 
-- Tableau de bord des dépenses.
-- Contrats électricité et gaz, tarifs simples ou heures pleines/heures creuses.
-- Import local de PDF avec extraction de texte et préremplissage indicatif.
-- Calculateur de consommation.
-- Bibliothèque d'appareils modifiable.
-- Comparaison de deux appareils.
-- Simulateur d'économies.
-- Mini-parcours pédagogique.
-- Sauvegarde locale dans le navigateur et export/import JSON.
+L’extraction est réalisée dans le navigateur avec PDF.js. Elle tente de préremplir les informations disponibles dans le texte du PDF. Les résultats doivent toujours être vérifiés et corrigés avant validation. Les PDF scannés (images) ne sont pas reconnus par OCR. Les factures d’électricité/gaz et leurs PDF sont centralisés dans « Analyser ma consommation » ; les factures d’eau restent dans la rubrique « Eau ».
 
-## Confidentialité et limites
+Les anciennes données `meterReadings` sont conservées lors du chargement et de la sauvegarde pour compatibilité, mais aucun écran de saisie ou d’affichage des index n’est proposé. Les anciennes sauvegardes restent compatibles.
 
-Les contrats, factures et réglages restent dans le stockage local du navigateur. Le PDF est lu dans le navigateur et n'est pas téléversé. L'extraction PDF est une aide : les factures varient selon les fournisseurs, les tableaux peuvent être difficiles à interpréter et les PDF scannés nécessitent de l'OCR. Vérifiez toujours les valeurs proposées avant de les enregistrer.
+## Confidentialité et sauvegardes
 
-Les calculs sont des estimations. Pour une estimation de coût variable, WATTS applique le prix TTC du kWh saisi. L'abonnement est affiché séparément dans les vues de contrat et de budget. Les taxes et régularisations déjà incluses dans un prix TTC ne doivent pas être ajoutées une seconde fois.
+Les paramètres et historiques sont stockés dans localStorage ; les PDF sont conservés dans IndexedDB sur cet appareil. Exportez régulièrement la sauvegarde JSON depuis le menu de l’application. Les PDF eux-mêmes ne sont pas intégrés à cette sauvegarde JSON : ils restent dans la bibliothèque locale du navigateur.
 
-La conversion du gaz utilise le coefficient figurant sur la facture. À défaut, la valeur indicative de 11,2 kWh/m³ est proposée ; elle ne remplace pas le coefficient réel du distributeur.
+## Publication GitHub Pages
 
-## Vérifications
+Remplacez les fichiers de l’application par ceux de cette archive, **mais conservez le dossier `.github/workflows` de votre dépôt** afin de ne pas supprimer le workflow de publication existant. Puis laissez GitHub Actions construire et publier le site.
 
-Le build TypeScript/Vite constitue le contrôle technique principal. Vérifiez sur votre propre contrat les prix, plages horaires, abonnements et coefficients avant toute décision financière.
+## Limites
 
-## Option Tempo
-Saisie des six tarifs Tempo (bleu/blanc/rouge, heures pleines/creuses). La couleur du jour est récupérée via l’API publique Calendrier Tempo, qui relaie les données publiées par RTE. En cas d’indisponibilité, elle reste sélectionnable manuellement. Vérifiez les tarifs sur votre facture.
-
-
-## WATTS 1.2 — améliorations factures
-- Le champ d'abonnement accepte désormais les décimales avec une virgule.
-- L'import PDF tente d'extraire localement le montant TTC, la consommation, la date et la période de facturation.
-- Les données détectées sont reportées dans le formulaire pour vérification et correction avant validation.
-- Le PDF est archivé localement dans IndexedDB et peut être rouvert depuis la bibliothèque.
-- Les factures scannées (images) ne sont pas reconnues par OCR : les champs doivent alors être complétés manuellement.
-\n- Les montants de facture négatifs sont acceptés pour enregistrer les avoirs et régularisations en faveur du client. La consommation reste positive ou nulle.\n
-## WATTS 1.3 – Analyse de la consommation
-
-Cette évolution ajoute une rubrique « Analyser ma consommation » :
-- relevés d'index datés pour plusieurs compteurs, avec calcul de l'écart entre deux relevés successifs du même compteur ;
-- conversion indicative du gaz en kWh à partir du coefficient saisi ;
-- saisie de bilans annuels et préremplissage indicatif depuis un PDF fournisseur (texte PDF uniquement, sans OCR) ;
-- comparaison annuelle en kWh et en pourcentage ;
-- stockage local dans la sauvegarde JSON.
-
-Les bilans annuels et les écarts de compteurs restent séparés pour éviter le double comptage. Les extractions PDF doivent être vérifiées. Les anciens fichiers de sauvegarde restent compatibles : les nouvelles collections sont initialisées vides si elles sont absentes.
-
-Pour publier sur GitHub Pages, remplacez les fichiers du projet par ceux de cette archive en conservant le dossier `.github/workflows` déjà présent dans votre dépôt.
-
-
-## WATTS 1.3.1 — Extraction ciblée EDF Tempo / ENGIE Gaz
-
-- Import des bilans PDF avec détection du fournisseur et de l'énergie.
-- EDF : période annuelle, total de consommation kWh, total TTC facturé et tentative d'extraction des six postes Tempo avec index début/fin.
-- ENGIE : période, consommation en kWh, total Gaz naturel TTC et informations de conversion des index lorsqu'elles sont présentes.
-- Les soldes de régularisation et remboursements ne sont pas confondus avec le coût annuel de l'énergie.
-- Les champs restent modifiables et doivent être validés par l'utilisateur.
-- Extraction réalisée localement avec PDF.js ; pas d'envoi des factures à un serveur. Les PDF scannés nécessitent encore un OCR.
+Les montants et consommations extraits dépendent de la présentation des factures. Les calculs de coût sont des estimations et ne remplacent pas le montant total facturé, qui peut inclure abonnement, taxes, assainissement, régularisations ou reports. Vérifiez les tarifs et coefficients sur vos documents.
