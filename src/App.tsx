@@ -58,6 +58,9 @@ type StoredPdf = { id: string; name: string; addedAt: string; size: number; blob
 const PDF_DB = 'watts-pdf-library'
 function openPdfDb(): Promise<IDBDatabase> { return new Promise((resolve,reject)=>{ const r=indexedDB.open(PDF_DB,1); r.onupgradeneeded=()=>{if(!r.result.objectStoreNames.contains('documents'))r.result.createObjectStore('documents',{keyPath:'id'})}; r.onsuccess=()=>resolve(r.result); r.onerror=()=>reject(r.error) }) }
 async function savePdf(file:File):Promise<string>{const db=await openPdfDb(),id=uid();await new Promise<void>((resolve,reject)=>{const tx=db.transaction('documents','readwrite');tx.objectStore('documents').put({id,name:file.name,addedAt:new Date().toISOString(),size:file.size,blob:file});tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error)});db.close();return id}
+async function writePdfDocuments(items:StoredPdf[],replaceAll=false):Promise<void>{const db=await openPdfDb();await new Promise<void>((resolve,reject)=>{const tx=db.transaction('documents','readwrite'),store=tx.objectStore('documents');if(replaceAll)store.clear();for(const item of items)store.put(item);tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error||new Error('Écriture PDF interrompue'))});db.close()}
+const bytesToBase64=(bytes:Uint8Array)=>{let binary='';const chunk=0x8000;for(let i=0;i<bytes.length;i+=chunk)binary+=String.fromCharCode(...bytes.subarray(i,i+chunk));return btoa(binary)}
+const base64ToBytes=(value:string)=>{const binary=atob(value),bytes=new Uint8Array(binary.length);for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);return bytes}
 async function listPdfs():Promise<Omit<StoredPdf,'blob'>[]>{const db=await openPdfDb();const a=await new Promise<StoredPdf[]>((resolve,reject)=>{const r=db.transaction('documents','readonly').objectStore('documents').getAll();r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});db.close();return a.map(({blob,...v})=>v)}
 async function getPdf(id:string):Promise<StoredPdf|undefined>{const db=await openPdfDb();const a=await new Promise<StoredPdf|undefined>((resolve,reject)=>{const r=db.transaction('documents','readonly').objectStore('documents').get(id);r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});db.close();return a}
 async function deletePdf(id:string):Promise<void>{const db=await openPdfDb();await new Promise<void>((resolve,reject)=>{const tx=db.transaction('documents','readwrite');tx.objectStore('documents').delete(id);tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error)});db.close()}
@@ -94,7 +97,10 @@ export default function App() {
   const waterFileRef=useRef<HTMLInputElement>(null)
   const [waterBusy,setWaterBusy]=useState(false)
 
-  useEffect(() => { localStorage.setItem(STORAGE, JSON.stringify(data)) }, [data])
+  useEffect(() => {
+    try { localStorage.setItem(STORAGE, JSON.stringify(data)) }
+    catch { setToast('Sauvegarde locale impossible : espace de stockage insuffisant. Exportez vos données dès que possible.') }
+  }, [data])
   useEffect(() => { listPdfs().then(setPdfDocs).catch(() => notify('Bibliothèque PDF indisponible.')) }, [])
   useEffect(() => { document.documentElement.dataset.theme = data.dark ? 'dark' : 'light' }, [data.dark])
   useEffect(() => {
@@ -123,10 +129,20 @@ export default function App() {
     const c = contract(e)
     return calcPrice.trim() && energy === e ? Number(calcPrice.replace(',', '.')) : c.price
   }
-  const monthly = useMemo(() => data.appliances.reduce((sum, a) => {
+  const appliancePrice = (a: Appliance) => {
     const c = contract(a.energy)
-    const kwh = a.energy === 'electricity' ? a.watts / 1000 * a.hours * a.days : a.watts / 1000 * a.hours * a.days
-    return sum + kwh * c.price
+    if (a.energy === 'gas') return c.price
+    if (c.tempoMode) {
+      const rates = [c.tempoBlueHp,c.tempoBlueHc,c.tempoWhiteHp,c.tempoWhiteHc,c.tempoRedHp,c.tempoRedHc]
+      const valid = rates.filter((v): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0)
+      return valid.length ? valid.reduce((sum,v)=>sum+v,0)/valid.length : c.price
+    }
+    if (c.hpHc) return (c.hpPrice + c.hcPrice) / 2
+    return c.price
+  }
+  const monthly = useMemo(() => data.appliances.reduce((sum, a) => {
+    const kwh = a.watts / 1000 * a.hours * a.days
+    return sum + kwh * appliancePrice(a)
   }, 0), [data])
   const totals = useMemo(() => ({
     electricity: data.bills.filter(b => b.energy === 'electricity').reduce((s, b) => s + b.amount, 0),
@@ -193,13 +209,13 @@ export default function App() {
         const pdfId=await savePdf(file);setPdfDocs(v=>[{id:pdfId,name:file.name,addedAt:new Date().toISOString(),size:file.size},...v])
         if(vm&&Number(vm[1])>0){
           const tariffMatch=txt.match(/(0,00\d{2,3})\s*€\s*\/?\s*litre/i)
-          const pricePerM3=tariffMatch?Number(tariffMatch[1].replace(',','.'))*1000:7.70
-          added.push({id:uid(),date,period:pm?`${pm[1]} au ${pm[2]}`:'Période à vérifier',consumption:Number(vm[1]),unitPrice:pricePerM3,label:file.name,pdfId})
+          const pricePerM3=tariffMatch?Number(tariffMatch[1].replace(',','.'))*1000:0
+          added.push({id:uid(),date,period:pm?`${pm[1]} au ${pm[2]}`:'Période à vérifier',consumption:Number(vm[1]),unitPrice:pricePerM3,label:file.name+(tariffMatch?'':' · prix à vérifier'),pdfId})
         }
         else notify(`PDF conservé ; volume non détecté, à saisir/vérifier : ${file.name}`)
       }
-      if(added.length)setData(d=>({...d,waterBills:[...d.waterBills.map(old=>{const match=added.find(x=>x.date===old.date);return match?{...old,pdfId:match.pdfId,label:match.label}:old}),...added.filter(x=>!d.waterBills.some(old=>old.date===x.date))]}))
-      notify(`${added.length} facture(s) d’eau intégrée(s). Vérifiez les données extraites.`)
+      if(added.length)setData(d=>({...d,waterBills:[...d.waterBills.map(old=>{const match=added.find(x=>x.date===old.date);return match?{...old,consumption:match.consumption,unitPrice:match.unitPrice,period:match.period,pdfId:match.pdfId,label:match.label}:old}),...added.filter(x=>!d.waterBills.some(old=>old.date===x.date))]}))
+      notify(`${added.length} facture(s) d’eau intégrée(s). Les prix non détectés sont laissés à 0 € : vérifiez-les dans le tableau.`)
     }catch{notify('Lecture PDF impossible.')}
     finally{setWaterBusy(false);if(waterFileRef.current)waterFileRef.current.value=''}
   }
@@ -212,32 +228,79 @@ export default function App() {
     setBillDraft(v => ({ ...v, amount: '', consumption: '', label: '', period: '' })); setExtracted(''); setPendingPdfId(undefined); notify('Facture ajoutée à votre historique.')
   }
   const openStoredPdf = async (id:string) => {const item=await getPdf(id);if(!item){notify('PDF introuvable.');return}const url=URL.createObjectURL(item.blob);window.open(url,'_blank','noopener');window.setTimeout(()=>URL.revokeObjectURL(url),60000)}
-  const removeStoredPdf = async (id:string) => {await deletePdf(id);setPdfDocs(v=>v.filter(x=>x.id!==id));setData(d=>({...d,bills:d.bills.map(b=>b.pdfId===id?{...b,pdfId:undefined}:b)}));notify('PDF supprimé.')}
-  const exportData = () => {
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
-    const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'watts-sauvegarde.json'; a.click(); URL.revokeObjectURL(url)
+  const removeStoredPdf = async (id:string) => {
+    try {
+      await deletePdf(id)
+      setPdfDocs(v=>v.filter(x=>x.id!==id))
+      setData(d=>({
+        ...d,
+        bills:d.bills.map(b=>b.pdfId===id?{...b,pdfId:undefined}:b),
+        waterBills:d.waterBills.map(b=>b.pdfId===id?{...b,pdfId:undefined}:b),
+        annualReports:d.annualReports.map(r=>r.pdfId===id?{...r,pdfId:undefined}:r),
+      }))
+      notify('PDF supprimé ; les historiques sont conservés.')
+    } catch { notify('Suppression du PDF impossible.') }
+  }
+  const exportData = async () => {
+    try {
+      const db = await openPdfDb()
+      const documents = await new Promise<StoredPdf[]>((resolve,reject) => {
+        const request = db.transaction('documents','readonly').objectStore('documents').getAll()
+        request.onsuccess = () => resolve(request.result)
+        request.onerror = () => reject(request.error)
+      })
+      db.close()
+      const pdfs = await Promise.all(documents.map(async doc => ({
+        id:doc.id,name:doc.name,addedAt:doc.addedAt,size:doc.size,
+        data:bytesToBase64(new Uint8Array(await doc.blob.arrayBuffer()))
+      })))
+      const backup = { format:'watts-backup', version:2, exportedAt:new Date().toISOString(), data, pdfs }
+      const blob = new Blob([JSON.stringify(backup)], { type:'application/json' })
+      const url = URL.createObjectURL(blob), a = document.createElement('a')
+      a.href = url; a.download = `watts-sauvegarde-${new Date().toISOString().slice(0,10)}.json`; a.click()
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+      notify(`Sauvegarde complète créée : ${pdfs.length} PDF inclus.`)
+    } catch {
+      notify('Export impossible. Vérifiez le stockage des PDF et réessayez.')
+    }
   }
   const importBackup = async (file?: File) => {
     if (!file) return
     try {
-      const parsed = JSON.parse(await file.text()) as Partial<Data>
-      if (!Array.isArray(parsed.contracts) || !Array.isArray(parsed.appliances)) throw new Error('Sauvegarde invalide')
-
-      // Conserve aussi un historique d'eau volontairement vide.
-      // Les anciens tarifs enregistrés en €/litre sont convertis en €/m³.
-      const waterBills: WaterBill[] = Array.isArray(parsed.waterBills)
-        ? parsed.waterBills.map((b: WaterBill) => ({
+      const parsed = JSON.parse(await file.text())
+      const payload = parsed?.format === 'watts-backup' ? parsed.data : parsed
+      if (!payload || !Array.isArray(payload.contracts) || !Array.isArray(payload.appliances)) throw new Error('Sauvegarde invalide')
+      const waterBills: WaterBill[] = Array.isArray(payload.waterBills)
+        ? payload.waterBills.map((b: WaterBill) => ({
             ...b,
-            unitPrice: Number(b.unitPrice) < 1
-              ? Number(b.unitPrice) * 1000
-              : Number(b.unitPrice),
+            unitPrice: Number(b.unitPrice) < 1 ? Number(b.unitPrice) * 1000 : Number(b.unitPrice),
           }))
         : INITIAL_WATER
-
-      setData({ ...defaultData, ...parsed, waterBills })
-      notify('Sauvegarde restaurée.')
+      const restored: Data = {
+        ...defaultData, ...payload,
+        contracts: payload.contracts,
+        appliances: payload.appliances,
+        bills: Array.isArray(payload.bills) ? payload.bills : [],
+        meterReadings: Array.isArray(payload.meterReadings) ? payload.meterReadings : [],
+        annualReports: Array.isArray(payload.annualReports) ? payload.annualReports : [],
+        waterBills,
+      }
+      const pdfs: StoredPdf[] = parsed?.format === 'watts-backup' && Array.isArray(parsed.pdfs)
+        ? parsed.pdfs.map((doc: any) => ({
+            id:String(doc.id), name:String(doc.name), addedAt:String(doc.addedAt),
+            size:Number(doc.size)||0,
+            blob:new Blob([base64ToBytes(String(doc.data)).buffer as ArrayBuffer], {type:'application/pdf'}),
+          }))
+        : []
+      if (parsed?.format === 'watts-backup') await writePdfDocuments(pdfs, true)
+      setData(restored)
+      const docs = await listPdfs()
+      setPdfDocs(docs)
+      notify(parsed?.format === 'watts-backup'
+        ? `Sauvegarde restaurée avec ${pdfs.length} PDF.`
+        : 'Ancienne sauvegarde restaurée. Les PDF ne figuraient pas dans ce format.')
     } catch {
-      notify('Fichier de sauvegarde invalide.')
+      notify('Sauvegarde invalide ou restauration impossible. Vos données actuelles sont conservées.')
     }
   }
   const addAppliance = () => setEditing({ id: uid(), name: '', category: 'Autre', energy: 'electricity', watts: 500, hours: 1, days: 30, note: '' })
@@ -247,7 +310,8 @@ export default function App() {
     setEditing(null); notify('Appareil enregistré.')
   }
   const [annualDetailsDraft,setAnnualDetailsDraft]=useState('')
-  const addAnnual=()=>{const consumption=Number(annualDraft.consumption.replace(',','.')),amount=annualDraft.amount.trim()?Number(annualDraft.amount.replace(',','.')):0,year=Number(annualDraft.year);if(!Number.isFinite(consumption)||consumption<0||!Number.isInteger(year)||year<2000||year>2100||!Number.isFinite(amount)){notify('Vérifiez l’année et les valeurs saisies.');return}setData(d=>({...d,annualReports:[...d.annualReports,{id:uid(),energy:annualDraft.energy,year,consumption,amount,period:annualDraft.period,source:annualDraft.source,details:annualDetailsDraft||undefined}]}));setAnnualDraft(v=>({...v,consumption:'',amount:''}));setAnnualDetailsDraft('');notify('Bilan annuel ajouté.')}
+  const [annualPdfId,setAnnualPdfId]=useState<string|undefined>()
+  const addAnnual=()=>{const consumption=Number(annualDraft.consumption.replace(',','.')),amount=annualDraft.amount.trim()?Number(annualDraft.amount.replace(',','.')):0,year=Number(annualDraft.year);if(!Number.isFinite(consumption)||consumption<0||!Number.isInteger(year)||year<2000||year>2100||!Number.isFinite(amount)){notify('Vérifiez l’année et les valeurs saisies.');return}setData(d=>({...d,annualReports:[...d.annualReports,{id:uid(),energy:annualDraft.energy,year,consumption,amount,period:annualDraft.period,source:annualDraft.source,pdfId:annualPdfId,details:annualDetailsDraft||undefined}]}));setAnnualPdfId(undefined);setAnnualDraft(v=>({...v,consumption:'',amount:''}));setAnnualDetailsDraft('');notify('Bilan annuel ajouté.')}
   const importAnnualPdf=async(file?:File)=>{
     if(!file)return
     try{
@@ -290,6 +354,7 @@ export default function App() {
       year=yearMatch?.[1]||new Date().getFullYear().toString()
       const id=await savePdf(file)
       setPdfDocs(v=>[{id,name:file.name,addedAt:new Date().toISOString(),size:file.size},...v])
+      setAnnualPdfId(id)
       setAnnualDraft(v=>({...v,energy,year,consumption:consumption||v.consumption,amount:amount||v.amount,period:period||v.period,source:file.name}))
       setAnnualDetailsDraft(details)
       setExtracted(`Analyse du document : ${energy==='gas'?'Gaz ENGIE':'Électricité EDF'}\\nConsommation annuelle : ${consumption?consumption+' kWh':'non détectée'}\\nMontant total facturé TTC : ${amount?amount+' €':'non détecté'}\\nPériode : ${period||'non détectée'}\\n${details||'Détail des index / plages non reconnu.'}\\n\\nVérifiez les champs avant validation. Les montants de régularisation (reste à payer ou remboursement) ne sont pas utilisés comme coût annuel.`)
@@ -298,7 +363,7 @@ export default function App() {
     finally{if(annualFileRef.current)annualFileRef.current.value=''}
   }
   const nav = (id: string) => { setPage(id); window.scrollTo({ top: 0, behavior: 'smooth' }) }
-  const appCost = (a: Appliance) => a.watts / 1000 * a.hours * a.days * contract(a.energy).price
+  const appCost = (a: Appliance) => a.watts / 1000 * a.hours * a.days * appliancePrice(a)
   const selectedA = data.appliances.find(a => a.name === compareA) || data.appliances[0]
   const selectedB = data.appliances.find(a => a.name === compareB) || data.appliances[1] || data.appliances[0]
   const lessons = [
@@ -336,7 +401,7 @@ export default function App() {
           <Metric icon="⌁" title="Appareils suivis" value={String(data.appliances.length)} unit=" appareils" detail="Estimations personnalisables" tone="purple"/>
         </div>
         <div className="dashboard-grid">
-          <section className="panel"><div className="panel-head"><div><span className="eyebrow">ESTIMATION INDICATIVE</span><h3>Coût mensuel des appareils</h3></div><span className="pill">Selon vos réglages</span></div><div className="big-number">{euro(monthly)}<small> / mois</small></div><p className="muted">Estimation variable calculée à partir de la puissance, de la durée d’usage et de vos tarifs enregistrés. Hors abonnement.</p><button className="button button-outline" onClick={() => nav('appliances')}>Voir mes appareils →</button></section>
+          <section className="panel"><div className="panel-head"><div><span className="eyebrow">ESTIMATION INDICATIVE</span><h3>Coût mensuel des appareils</h3></div><span className="pill">Selon vos réglages</span></div><div className="big-number">{euro(monthly)}<small> / mois</small></div><p className="muted">Estimation variable calculée à partir de la puissance, de la durée d’usage et de vos tarifs enregistrés. Hors abonnement. Pour HP/HC, répartition indicative 50/50 ; pour Tempo, moyenne simple des six tarifs.</p><button className="button button-outline" onClick={() => nav('appliances')}>Voir mes appareils →</button></section>
           <section className="panel insight"><div className="insight-icon">✦</div><span className="eyebrow">LE BON RÉFLEXE</span><h3>Un chiffre à comprendre</h3><p>Un appareil de 1 000 W utilisé pendant 1 heure consomme 1 kWh. C’est le kWh qui sert de base à la facturation de l’énergie.</p><button className="text-button" onClick={() => nav('learn')}>Découvrir les bases →</button></section>
         </div>
         <section className="panel quick-panel"><div className="panel-head"><div><span className="eyebrow">POUR ALLER PLUS VITE</span><h3>Que souhaitez-vous faire ?</h3></div></div><div className="quick-grid"><Quick icon="∑" title="Calculer un coût" text="Estimer une consommation" onClick={() => nav('calculator')}/><Quick icon="▤" title="Importer une facture" text="Ajouter une facture PDF" onClick={() => nav('analysis')}/><Quick icon="⇄" title="Comparer" text="Deux appareils ou usages" onClick={() => nav('compare')}/><Quick icon="✳" title="Apprendre" text="Comprendre les notions" onClick={() => nav('learn')}/></div></section>
@@ -377,8 +442,8 @@ export default function App() {
           {data.bills.length === 0 ? <Empty text="Aucune facture enregistrée. Importez un PDF pour extraire les données ou complétez les champs manuellement."/ > : <div className="table-wrap"><table><thead><tr><th>Date</th><th>Période</th><th>Énergie</th><th>Libellé</th><th>Consommation</th><th>Montant</th><th/></tr></thead><tbody>{data.bills.map(b => <tr key={b.id}><td>{new Date(b.date+'T12:00:00').toLocaleDateString('fr-FR')}</td><td>{b.period || '—'}</td><td><span className={`energy-dot ${b.energy}`}/>{energyName(b.energy)}</td><td>{b.label}</td><td>{num(b.consumption)} kWh</td><td><b>{euro(b.amount)}</b></td><td><button className="delete-button" aria-label="Supprimer cette facture" onClick={() => setData(d => ({...d,bills:d.bills.filter(x=>x.id!==b.id)}))}>×</button></td></tr>)}</tbody></table></div>}
         </section>
         <section className="panel pdf-library"><div className="panel-head"><div><span className="eyebrow">DOCUMENTS CONSERVÉS SUR CET APPAREIL</span><h3>Bibliothèque des PDF</h3></div><span className="pill">{pdfDocs.length} document(s)</span></div>{pdfDocs.length ? <div className="pdf-list">{pdfDocs.map(doc=><div className="pdf-row" key={doc.id}><span className="pdf-icon">PDF</span><div className="pdf-meta"><b>{doc.name}</b><small>{new Date(doc.addedAt).toLocaleDateString('fr-FR')} · {(doc.size/1024).toFixed(0)} Ko</small></div><button className="text-button" onClick={()=>openStoredPdf(doc.id)}>Ouvrir</button><button className="delete-button" aria-label="Supprimer le PDF" onClick={()=>removeStoredPdf(doc.id)}>×</button></div>)}</div>:<p className="muted small">Les PDF importés apparaîtront ici. Ils restent stockés localement dans ce navigateur.</p>}</section>
-        <section className="panel"><div className="panel-head"><div><span className="eyebrow">2 · BILANS ANNUELS FOURNISSEUR</span><h3>Compléter un bilan annuel</h3></div><button className="button button-outline" onClick={()=>annualFileRef.current?.click()}>Importer un PDF de bilan</button><input ref={annualFileRef} hidden type="file" accept="application/pdf,.pdf" onChange={e=>importAnnualPdf(e.target.files?.[0])}/></div><div className="bill-form"><select value={annualDraft.energy} onChange={e=>setAnnualDraft(v=>({...v,energy:e.target.value as Energy}))}><option value="electricity">Électricité</option><option value="gas">Gaz</option></select><input type="number" min="2000" max="2100" value={annualDraft.year} onChange={e=>setAnnualDraft(v=>({...v,year:e.target.value}))} placeholder="Année"/><input inputMode="decimal" value={annualDraft.consumption} onChange={e=>setAnnualDraft(v=>({...v,consumption:e.target.value}))} placeholder="Consommation annuelle (kWh)"/><input inputMode="decimal" value={annualDraft.amount} onChange={e=>setAnnualDraft(v=>({...v,amount:e.target.value}))} placeholder="Montant annuel (€), facultatif"/><input value={annualDraft.period} onChange={e=>setAnnualDraft(v=>({...v,period:e.target.value}))} placeholder="Période"/><button className="button button-primary" onClick={addAnnual}>Ajouter le bilan</button></div>{annualDetailsDraft && <pre className="extracted">{annualDetailsDraft}</pre>}{data.annualReports.length===0?<Empty text="Aucun bilan annuel enregistré. Vous pouvez en ajouter un si votre fournisseur fournit un récapitulatif annuel."/>:<div className="table-wrap"><table><thead><tr><th>Année</th><th>Énergie</th><th>Consommation</th><th>Montant</th><th>Période / source</th><th/></tr></thead><tbody>{[...data.annualReports].sort((a,b)=>b.year-a.year).map(r=><tr key={r.id}><td>{r.year}</td><td>{energyName(r.energy)}</td><td><b>{num(r.consumption)} kWh</b></td><td>{r.amount?euro(r.amount):'—'}</td><td>{r.period} · {r.source}</td><td><button className="delete-button" onClick={()=>setData(d=>({...d,annualReports:d.annualReports.filter(x=>x.id!==r.id)}))}>×</button></td></tr>)}</tbody></table></div>}</section>
-        <section className="panel"><span className="eyebrow">3 · COMPARAISON ANNUELLE</span><h3>Évolution de vos consommations</h3>{(['electricity','gas'] as Energy[]).map(e=>{const rows=data.annualReports.filter(r=>r.energy===e).sort((a,b)=>a.year-b.year);return <div key={e} style={{marginTop:18}}><b>{energyName(e)}</b>{rows.length===0?<p className="muted small">Ajoutez des bilans annuels pour afficher l’évolution.</p>:rows.map((r,i)=>{const prev=rows[i-1],pct=prev?(r.consumption-prev.consumption)/prev.consumption*100:null;return <div className="annual-bar-row" key={r.id}><span>{r.year}</span><div className="annual-track"><div className="annual-fill" style={{width:`${Math.max(2,r.consumption/Math.max(...rows.map(x=>x.consumption),1)*100)}%`}}/></div><b>{num(r.consumption)} kWh</b><small>{pct===null?'Référence':`${pct>0?'+':''}${num(pct)} %`}</small></div>})}</div>})}<p className="hint">Les bilans annuels et les factures détaillées sont affichés séparément pour éviter tout double comptage. Comparez des périodes et périmètres équivalents.</p></section>
+        <section className="panel"><div className="panel-head"><div><span className="eyebrow">2 · BILANS ANNUELS FOURNISSEUR</span><h3>Compléter un bilan annuel</h3></div><button className="button button-outline" onClick={()=>annualFileRef.current?.click()}>Importer un PDF de bilan</button><input ref={annualFileRef} hidden type="file" accept="application/pdf,.pdf" onChange={e=>importAnnualPdf(e.target.files?.[0])}/></div><div className="bill-form"><select value={annualDraft.energy} onChange={e=>setAnnualDraft(v=>({...v,energy:e.target.value as Energy}))}><option value="electricity">Électricité</option><option value="gas">Gaz</option></select><input type="number" min="2000" max="2100" value={annualDraft.year} onChange={e=>setAnnualDraft(v=>({...v,year:e.target.value}))} placeholder="Année"/><input inputMode="decimal" value={annualDraft.consumption} onChange={e=>setAnnualDraft(v=>({...v,consumption:e.target.value}))} placeholder="Consommation annuelle (kWh)"/><input inputMode="decimal" value={annualDraft.amount} onChange={e=>setAnnualDraft(v=>({...v,amount:e.target.value}))} placeholder="Montant annuel (€), facultatif"/><input value={annualDraft.period} onChange={e=>setAnnualDraft(v=>({...v,period:e.target.value}))} placeholder="Période"/><button className="button button-primary" onClick={addAnnual}>Ajouter le bilan</button></div>{annualDetailsDraft && <pre className="extracted">{annualDetailsDraft}</pre>}{data.annualReports.length===0?<Empty text="Aucun bilan annuel enregistré. Vous pouvez en ajouter un si votre fournisseur fournit un récapitulatif annuel."/>:<div className="table-wrap"><table><thead><tr><th>Année</th><th>Énergie</th><th>Consommation</th><th>Montant</th><th>Période / source</th><th/></tr></thead><tbody>{[...data.annualReports].sort((a,b)=>b.year-a.year).map(r=><tr key={r.id}><td>{r.year}</td><td>{energyName(r.energy)}</td><td><b>{num(r.consumption)} kWh</b></td><td>{r.amount?euro(r.amount):'—'}</td><td>{r.period} · {r.source}{r.pdfId&&<> · <button className="text-button" onClick={()=>openStoredPdf(r.pdfId!)}>PDF</button></>}</td><td><button className="delete-button" onClick={()=>setData(d=>({...d,annualReports:d.annualReports.filter(x=>x.id!==r.id)}))}>×</button></td></tr>)}</tbody></table></div>}</section>
+        <section className="panel"><span className="eyebrow">3 · COMPARAISON ANNUELLE</span><h3>Évolution de vos consommations</h3>{(['electricity','gas'] as Energy[]).map(e=>{const rows=data.annualReports.filter(r=>r.energy===e).sort((a,b)=>a.year-b.year);return <div key={e} style={{marginTop:18}}><b>{energyName(e)}</b>{rows.length===0?<p className="muted small">Ajoutez des bilans annuels pour afficher l’évolution.</p>:rows.map((r,i)=>{const prev=rows[i-1],pct=prev&&prev.consumption!==0?(r.consumption-prev.consumption)/prev.consumption*100:null;return <div className="annual-bar-row" key={r.id}><span>{r.year}</span><div className="annual-track"><div className="annual-fill" style={{width:`${Math.max(2,r.consumption/Math.max(...rows.map(x=>x.consumption),1)*100)}%`}}/></div><b>{num(r.consumption)} kWh</b><small>{pct===null?'Référence':`${pct>0?'+':''}${num(pct)} %`}</small></div>})}</div>})}<p className="hint">Les bilans annuels et les factures détaillées sont affichés séparément pour éviter tout double comptage. Comparez des périodes et périmètres équivalents.</p></section>
         <section className="panel privacy-panel"><span className="privacy-symbol">▣</span><div><b>Vos documents restent privés</b><p className="muted">Les PDF sont lus directement dans votre navigateur et conservés sur cet appareil. Les informations extraites restent à vérifier avant validation.</p></div></section>
       </div>}
 
@@ -398,7 +463,7 @@ export default function App() {
 
       {page === 'compare' && <div className="page-content"><div className="section-heading"><div><span className="eyebrow">METTRE EN PERSPECTIVE</span><h2>Comparer deux appareils</h2><p className="muted">Comparez leurs coûts estimés avec vos tarifs enregistrés.</p></div></div><section className="panel compare-panel"><div className="compare-selects"><label>Premier appareil<select value={compareA} onChange={e=>setCompareA(e.target.value)}>{data.appliances.map(a=><option key={a.id}>{a.name}</option>)}</select></label><div className="versus">VS</div><label>Second appareil<select value={compareB} onChange={e=>setCompareB(e.target.value)}>{data.appliances.map(a=><option key={a.id}>{a.name}</option>)}</select></label></div><div className="compare-results">{[selectedA,selectedB].map((a,i)=><div className="compare-result" key={a.id}><span className={`appliance-symbol ${a.energy}`}>{a.energy==='electricity'?'ϟ':'♨'}</span><h3>{a.name}</h3><div className="compare-price">{euro(appCost(a))}<small> / mois</small></div><p className="muted small">{num(a.watts)} W · {num(a.hours)} h/jour</p><div className="bar-track"><div className={`bar-fill bar-${i}`} style={{width:`${Math.max(3,appCost(a)/Math.max(appCost(selectedA),appCost(selectedB),0.01)*100)}%`}}/></div></div>)}</div><p className="hint">Les appareils peuvent avoir des usages et des énergies différents. Les résultats ne sont comparables que si les hypothèses d’utilisation sont pertinentes.</p></section></div>}
 
-      {page === 'savings' && <div className="page-content"><div className="section-heading"><div><span className="eyebrow">SIMULER UN CHANGEMENT</span><h2>Et si vous changiez vos habitudes ?</h2><p className="muted">Estimez l’effet d’une réduction du temps d’utilisation d’un appareil.</p></div></div><Savings appliances={data.appliances} price={e=>contract(e).price}/><section className="panel"><span className="eyebrow">QUELQUES REPÈRES</span><h3>Les économies commencent par la mesure</h3><div className="tip-grid"><Tip title="Repérer les veilles" text="Une faible puissance permanente peut finir par représenter une consommation annuelle non négligeable."/><Tip title="Adapter la température" text="Le chauffage est souvent un poste important. Une baisse modérée de consigne peut réduire les besoins, selon le logement."/><Tip title="Comparer les cycles" text="Pour le lave-linge et le sèche-linge, regardez les kWh par cycle indiqués par le fabricant ou l’étiquette énergie."/></div></section></div>}
+      {page === 'savings' && <div className="page-content"><div className="section-heading"><div><span className="eyebrow">SIMULER UN CHANGEMENT</span><h2>Et si vous changiez vos habitudes ?</h2><p className="muted">Estimez l’effet d’une réduction du temps d’utilisation d’un appareil.</p></div></div><Savings appliances={data.appliances} price={a=>appliancePrice(a)}/><section className="panel"><span className="eyebrow">QUELQUES REPÈRES</span><h3>Les économies commencent par la mesure</h3><div className="tip-grid"><Tip title="Repérer les veilles" text="Une faible puissance permanente peut finir par représenter une consommation annuelle non négligeable."/><Tip title="Adapter la température" text="Le chauffage est souvent un poste important. Une baisse modérée de consigne peut réduire les besoins, selon le logement."/><Tip title="Comparer les cycles" text="Pour le lave-linge et le sèche-linge, regardez les kWh par cycle indiqués par le fabricant ou l’étiquette énergie."/></div></section></div>}
 
       {page === 'learn' && <div className="page-content"><div className="section-heading"><div><span className="eyebrow">APPRENDRE À SON RYTHME</span><h2>L’énergie en clair</h2><p className="muted">Des explications courtes, avec des exemples concrets.</p></div><span className="pill">10 mini-leçons</span></div><div className="learn-layout"><nav className="lesson-list">{lessons.map((l,i)=><button key={l.title} className={lesson===i?'lesson-active':''} onClick={()=>setLesson(i)}><span>{String(i+1).padStart(2,'0')}</span><div><small>{l.tag}</small><b>{l.title}</b></div><i>→</i></button>)}</nav><article className="panel lesson-content"><span className="eyebrow">LEÇON {String(lesson+1).padStart(2,'0')} / 10</span><h2>{lessons[lesson].title}</h2><p>{lessons[lesson].body}</p><div className="example-box"><span>✦ EXEMPLE CONCRET</span><b>{lessons[lesson].example}</b></div><div className="lesson-controls"><button className="button button-outline" disabled={lesson===0} onClick={()=>setLesson(v=>v-1)}>← Précédent</button><button className="button button-primary" onClick={()=>setLesson(v=>(v+1)%lessons.length)}>{lesson===lessons.length-1?'Recommencer':'Leçon suivante'} →</button></div></article></div></div>}
       <footer className="footer"><span>WATTS <b>·</b> Comprendre. Calculer. Économiser.</span><span>Vos données restent sur votre appareil.</span></footer>
@@ -420,5 +485,5 @@ function ContractCard({energy,contract,onEdit,onReset}:{energy:Energy;contract:C
 }
 function ContractEditor({energy,value,onSave,onClose}:{energy:Energy;value:Contract;onSave:(p:Partial<Contract>)=>void;onClose:()=>void}) { const [v,setV]=useState(value); return <div className="modal-backdrop"><div className="modal"><div className="modal-head"><div><span className="eyebrow">PARAMÈTRES DU CONTRAT</span><h2>{energy==='electricity'?'Électricité':'Gaz'}</h2></div><button className="delete-button" onClick={onClose}>×</button></div><p className="muted">Renseignez les informations telles qu’elles apparaissent sur votre facture ou votre espace client.</p><div className="form-grid"><Field label="Prix du kWh TTC" value={String(v.price)} suffix="€" onChange={x=>setV(s=>({...s,price:Number(x)||0}))}/><DecimalField label="Abonnement mensuel TTC" value={v.subscription} suffix="€" onCommit={x=>setV(s=>({...s,subscription:x}))}/>{energy==='gas'&&<Field label="Coefficient m³ → kWh" value={String(v.gasCoefficient)} suffix="kWh/m³" onChange={x=>setV(s=>({...s,gasCoefficient:Number(x)||0}))}/>}</div><div className="modal-actions"><button className="button button-outline" onClick={onClose}>Annuler</button><button className="button button-primary" onClick={()=>onSave(v)}>Enregistrer</button></div></div></div> }
 function ApplianceEditor({value,onChange,onSave,onDelete,onClose,isNew}:{value:Appliance;onChange:(v:Appliance)=>void;onSave:()=>void;onDelete:()=>void;onClose:()=>void;isNew:boolean}) { const set=(p:Partial<Appliance>)=>onChange({...value,...p}); return <div className="modal-backdrop"><div className="modal"><div className="modal-head"><div><span className="eyebrow">VOTRE ÉQUIPEMENT</span><h2>{isNew?'Ajouter un appareil':'Modifier un appareil'}</h2></div><button className="delete-button" onClick={onClose}>×</button></div><div className="form-grid"><label className="field full"><span>Nom de l’appareil</span><input value={value.name} onChange={e=>set({name:e.target.value})}/></label><label className="field"><span>Énergie</span><select value={value.energy} onChange={e=>set({energy:e.target.value as Energy})}><option value="electricity">Électricité</option><option value="gas">Gaz</option></select></label><label className="field"><span>Catégorie</span><input value={value.category} onChange={e=>set({category:e.target.value})}/></label><Field label="Puissance" value={String(value.watts)} suffix="W" onChange={v=>set({watts:Number(v)||0})}/><Field label="Heures par jour" value={String(value.hours)} suffix="h" onChange={v=>set({hours:Number(v)||0})}/><Field label="Jours par mois" value={String(value.days)} suffix="j" onChange={v=>set({days:Number(v)||0})}/><label className="field full"><span>Note pédagogique</span><textarea value={value.note} onChange={e=>set({note:e.target.value})}/></label></div><div className="modal-actions">{!isNew&&<button className="button button-danger" onClick={onDelete}>Supprimer</button>}<span/><button className="button button-outline" onClick={onClose}>Annuler</button><button className="button button-primary" onClick={onSave}>Enregistrer</button></div></div></div> }
-function Savings({appliances,price}:{appliances:Appliance[];price:(e:Energy)=>number}) { const [id,setId]=useState(appliances[0]?.id||''); const [reduction,setReduction]=useState(20); const a=appliances.find(x=>x.id===id)||appliances[0]; if(!a)return <Empty text="Ajoutez un appareil pour lancer une simulation."/>; const before=a.watts/1000*a.hours*a.days*price(a.energy); const saved=before*reduction/100; return <section className="panel savings-panel"><label className="field"><span>Choisir un appareil</span><select value={id} onChange={e=>setId(e.target.value)}>{appliances.map(x=><option value={x.id}>{x.name}</option>)}</select></label><Range label="Réduire le temps d’utilisation de" value={reduction} min={0} max={90} step={5} onChange={setReduction}/><div className="savings-results"><div><span>Coût estimé actuel</span><b>{euro(before)}<small>/mois</small></b></div><div><span>Économie estimée</span><b className="saving-green">{euro(saved)}<small>/mois</small></b></div><div><span>Économie annuelle</span><b className="saving-green">{euro(saved*12)}</b></div></div><div className="saving-message">En réduisant de {reduction}% le temps d’utilisation de <b>{a.name}</b>, vous pourriez économiser environ <b>{euro(saved*12)} par an</b>, selon les hypothèses saisies.</div><p className="hint">Simulation théorique : elle suppose une baisse proportionnelle de la consommation. Elle ne prédit pas les économies réelles d’un logement.</p></section> }
+function Savings({appliances,price}:{appliances:Appliance[];price:(a:Appliance)=>number}) { const [id,setId]=useState(appliances[0]?.id||''); const [reduction,setReduction]=useState(20); const a=appliances.find(x=>x.id===id)||appliances[0]; if(!a)return <Empty text="Ajoutez un appareil pour lancer une simulation."/>; const before=a.watts/1000*a.hours*a.days*price(a); const saved=before*reduction/100; return <section className="panel savings-panel"><label className="field"><span>Choisir un appareil</span><select value={id} onChange={e=>setId(e.target.value)}>{appliances.map(x=><option key={x.id} value={x.id}>{x.name}</option>)}</select></label><Range label="Réduire le temps d’utilisation de" value={reduction} min={0} max={90} step={5} onChange={setReduction}/><div className="savings-results"><div><span>Coût estimé actuel</span><b>{euro(before)}<small>/mois</small></b></div><div><span>Économie estimée</span><b className="saving-green">{euro(saved)}<small>/mois</small></b></div><div><span>Économie annuelle</span><b className="saving-green">{euro(saved*12)}</b></div></div><div className="saving-message">En réduisant de {reduction}% le temps d’utilisation de <b>{a.name}</b>, vous pourriez économiser environ <b>{euro(saved*12)} par an</b>, selon les hypothèses saisies.</div><p className="hint">Simulation théorique : elle suppose une baisse proportionnelle de la consommation. Elle ne prédit pas les économies réelles d’un logement.</p></section> }
 function Tip({title,text}:{title:string;text:string}) { return <div className="tip"><span>✦</span><div><b>{title}</b><p>{text}</p></div></div> }

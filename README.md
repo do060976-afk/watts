@@ -1,57 +1,44 @@
-# WATTS 1.5.2
+# WATTS 1.6.0
 
 Application web autonome pour comprendre et suivre les consommations domestiques d’électricité, de gaz et d’eau. Les données sont conservées localement dans le navigateur.
 
-## Démarrer
+## Démarrer et construire
 
 ```bash
 npm install
 npm run dev
-```
-
-## Construire
-
-```bash
 npm run build
 npm run preview
 ```
 
-## Organisation de l’application
+## Organisation
 
 - **Vue d’ensemble** : indicateurs synthétiques et accès rapides.
-- **Mes contrats** : fournisseurs, offres, tarifs, abonnements, puissance et paramètres Tempo. Aucun import ni historique de factures dans cette rubrique.
-- **Analyser ma consommation** : point d’entrée unique pour importer, vérifier, enregistrer et consulter les factures d’électricité et de gaz ; bibliothèque des PDF ; bilans annuels et comparaisons. Les index ne sont pas saisis séparément : ils sont lus sur les factures.
-- **Eau** : historique semestriel Veolia, import des nouvelles factures et suivi des volumes.
+- **Mes contrats** : fournisseurs, offres, tarifs, abonnements, puissance et paramètres Tempo.
+- **Analyser ma consommation** : factures d’électricité et de gaz, bibliothèque PDF, bilans annuels et comparaisons.
+- **Eau** : historique semestriel, import PDF et suivi des volumes et prix au m³.
 - **Calculer, Mes appareils, Comparer, Économiser, Comprendre** : outils d’estimation et d’apprentissage.
 
-## Factures et extraction PDF
+## Sauvegardes et documents
 
-L’extraction est réalisée dans le navigateur avec PDF.js. Elle tente de préremplir les informations disponibles dans le texte du PDF. Les résultats doivent toujours être vérifiés et corrigés avant validation. Les PDF scannés (images) ne sont pas reconnus par OCR. Les factures d’électricité/gaz et leurs PDF sont centralisés dans « Analyser ma consommation » ; les factures d’eau restent dans la rubrique « Eau ».
+Les paramètres et historiques sont conservés dans `localStorage`. Les PDF sont conservés dans `IndexedDB`.
 
-Les anciennes données `meterReadings` sont conservées lors du chargement et de la sauvegarde pour compatibilité, mais aucun écran de saisie ou d’affichage des index n’est proposé. Les anciennes sauvegardes restent compatibles.
+La sauvegarde JSON de WATTS 1.6 inclut désormais les données et le contenu des PDF. La restauration de ce format rétablit les deux. Les anciennes sauvegardes JSON restent acceptées, mais elles ne peuvent pas restituer les PDF qui n'y étaient pas intégrés.
 
-## Confidentialité et sauvegardes
+Conservez régulièrement une copie de la sauvegarde sur un autre support. Les données restent sur l'appareil et dans le navigateur utilisés : elles ne sont pas synchronisées entre appareils.
 
-Les paramètres et historiques sont stockés dans localStorage ; les PDF sont conservés dans IndexedDB sur cet appareil. Exportez régulièrement la sauvegarde JSON depuis le menu de l’application. Les PDF eux-mêmes ne sont pas intégrés à cette sauvegarde JSON : ils restent dans la bibliothèque locale du navigateur.
+## Imports PDF
+
+L'extraction est réalisée dans le navigateur avec PDF.js. Elle tente de préremplir les informations disponibles dans le texte du PDF. Les résultats doivent toujours être vérifiés et corrigés avant validation. Les PDF scannés (images) ne sont pas reconnus par OCR.
+
+Un tarif d'eau non détecté n'est plus remplacé par une valeur supposée : il est laissé à 0 € pour attirer l'attention et doit être vérifié dans le tableau.
+
+## Tarifs et estimations
+
+Les coûts des appareils sont indicatifs. Pour les offres HP/HC et Tempo, la précision dépend de la répartition réelle de l'utilisation entre les plages horaires et les couleurs. Vérifiez les hypothèses affichées avant d'interpréter les résultats.
+
+Les montants extraits des factures ne remplacent pas nécessairement le coût de la consommation : abonnements, taxes, assainissement, régularisations et reports peuvent s'y ajouter.
 
 ## Publication GitHub Pages
 
-Remplacez les fichiers de l’application par ceux de cette archive, **mais conservez le dossier `.github/workflows` de votre dépôt** afin de ne pas supprimer le workflow de publication existant. Puis laissez GitHub Actions construire et publier le site.
-
-## Limites
-
-Les montants et consommations extraits dépendent de la présentation des factures. Les calculs de coût sont des estimations et ne remplacent pas le montant total facturé, qui peut inclure abonnement, taxes, assainissement, régularisations ou reports. Vérifiez les tarifs et coefficients sur vos documents.
-
-
-### Suivi de l'eau – 1.5.2
-- Décomposition par facture entre coût variable de consommation (m³) et abonnement.
-- Évolution historique du prix au m³, hors abonnement.
-- Prix au m³ et abonnement modifiables directement dans l'historique.
-- Extraction indicative du prix unitaire et de l'abonnement depuis les PDF, à vérifier.
-- Les prix historiques préremplis sont des valeurs indicatives issues des factures Veolia ; les abonnements restent à compléter lorsque non extraits.
-
-
-### Eau – 1.5.2
-- Suppression de la notion d'abonnement pour l'eau.
-- Graphique du prix au m³ recalibré sur la plage réelle des tarifs pour rendre visibles les petites variations.
-- Conversion automatique des anciennes valeurs enregistrées en €/litre vers €/m³ lors du chargement.
+Remplacez les fichiers de l'application par ceux de cette archive, **mais conservez le dossier `.github/workflows` de votre dépôt** afin de ne pas supprimer le workflow de publication existant. Puis laissez GitHub Actions construire et publier le site.
