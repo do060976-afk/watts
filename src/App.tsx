@@ -1,0 +1,245 @@
+import { useEffect, useMemo, useRef, useState } from 'react'
+import * as pdfjsLib from 'pdfjs-dist'
+import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker
+
+type Energy = 'electricity' | 'gas'
+type Contract = {
+  energy: Energy; supplier: string; offer: string; price: number; hpPrice: number; hcPrice: number;
+  subscription: number; power: string; gasCoefficient: number; hpHc: boolean; updated: string
+}
+type Appliance = { id: string; name: string; category: string; energy: Energy; watts: number; hours: number; days: number; note: string }
+type Bill = { id: string; energy: Energy; date: string; amount: number; consumption: number; label: string }
+type Data = { contracts: Contract[]; appliances: Appliance[]; bills: Bill[]; dark: boolean }
+const STORAGE = 'watts-data-v1'
+const euro = (n: number) => n.toLocaleString('fr-FR', { style: 'currency', currency: 'EUR' })
+const num = (n: number) => n.toLocaleString('fr-FR', { maximumFractionDigits: 2 })
+const uid = () => Math.random().toString(36).slice(2, 10)
+const defaultData: Data = {
+  contracts: [
+    { energy: 'electricity', supplier: '', offer: '', price: 0.20, hpPrice: 0.22, hcPrice: 0.17, subscription: 15, power: '6 kVA', gasCoefficient: 11.2, hpHc: false, updated: '' },
+    { energy: 'gas', supplier: '', offer: '', price: 0.12, hpPrice: 0.12, hcPrice: 0.12, subscription: 25, power: '', gasCoefficient: 11.2, hpHc: false, updated: '' },
+  ],
+  appliances: [
+    { id: uid(), name: 'Radiateur électrique', category: 'Chauffage', energy: 'electricity', watts: 2000, hours: 5, days: 30, note: 'Puissance nominale ; le thermostat peut réduire le temps de chauffe réel.' },
+    { id: uid(), name: 'Réfrigérateur', category: 'Cuisine', energy: 'electricity', watts: 80, hours: 8, days: 30, note: 'Puissance moyenne simplifiée : un réfrigérateur fonctionne par cycles.' },
+    { id: uid(), name: 'Lave-linge', category: 'Linge', energy: 'electricity', watts: 2000, hours: 1, days: 12, note: 'La puissance de chauffe est ponctuelle ; mieux vaut utiliser les kWh/cycle si connus.' },
+    { id: uid(), name: 'Sèche-linge', category: 'Linge', energy: 'electricity', watts: 2500, hours: 1.5, days: 8, note: 'Valeur indicative, très variable selon le modèle.' },
+    { id: uid(), name: 'Télévision', category: 'Multimédia', energy: 'electricity', watts: 100, hours: 4, days: 30, note: 'Consommation indicative.' },
+    { id: uid(), name: 'Ordinateur', category: 'Multimédia', energy: 'electricity', watts: 150, hours: 5, days: 22, note: 'Dépend fortement du matériel et de l’usage.' },
+    { id: uid(), name: 'Four électrique', category: 'Cuisine', energy: 'electricity', watts: 2200, hours: 1, days: 12, note: 'La résistance ne chauffe pas en continu à pleine puissance.' },
+    { id: uid(), name: 'Box Internet', category: 'Multimédia', energy: 'electricity', watts: 12, hours: 24, days: 30, note: 'Fonctionne généralement en continu.' },
+    { id: uid(), name: 'Chauffe-eau électrique', category: 'Eau chaude', energy: 'electricity', watts: 2000, hours: 3, days: 30, note: 'Durée équivalente de chauffe estimative.' },
+    { id: uid(), name: 'Plaque de cuisson', category: 'Cuisine', energy: 'electricity', watts: 1800, hours: 1, days: 30, note: 'Puissance moyenne simplifiée.' },
+    { id: uid(), name: 'Chaudière gaz', category: 'Chauffage', energy: 'gas', watts: 10000, hours: 3, days: 30, note: 'Puissance thermique indicative en watts ; approximation de durée à adapter.' },
+    { id: uid(), name: 'Cuisson au gaz', category: 'Cuisine', energy: 'gas', watts: 2000, hours: 1, days: 20, note: 'Puissance thermique indicative, selon brûleur et réglage.' },
+  ],
+  bills: [], dark: false,
+}
+const loadData = (): Data => {
+  try {
+    const raw = localStorage.getItem(STORAGE)
+    if (!raw) return defaultData
+    const parsed = JSON.parse(raw) as Partial<Data>
+    return { ...defaultData, ...parsed, contracts: parsed.contracts?.length ? parsed.contracts : defaultData.contracts, appliances: parsed.appliances?.length ? parsed.appliances : defaultData.appliances, bills: parsed.bills || [] }
+  } catch { return defaultData }
+}
+const labels: Record<string, string> = { dashboard: 'Vue d’ensemble', contracts: 'Mes contrats & factures', calculator: 'Calculer', appliances: 'Mes appareils', compare: 'Comparer', savings: 'Économiser', learn: 'Comprendre' }
+
+export default function App() {
+  const [data, setData] = useState<Data>(loadData)
+  const [page, setPage] = useState('dashboard')
+  const [toast, setToast] = useState('')
+  const [energy, setEnergy] = useState<Energy>('electricity')
+  const [calcWatts, setCalcWatts] = useState(1500)
+  const [calcHours, setCalcHours] = useState(2)
+  const [calcDays, setCalcDays] = useState(30)
+  const [calcPrice, setCalcPrice] = useState('')
+  const [calcGasM3, setCalcGasM3] = useState(10)
+  const [calcCoefficient, setCalcCoefficient] = useState(11.2)
+  const [compareA, setCompareA] = useState('Radiateur électrique')
+  const [compareB, setCompareB] = useState('Sèche-linge')
+  const [filter, setFilter] = useState<Energy | 'all'>('all')
+  const [editing, setEditing] = useState<Appliance | null>(null)
+  const [lesson, setLesson] = useState(0)
+  const [billDraft, setBillDraft] = useState({ energy: 'electricity' as Energy, date: new Date().toISOString().slice(0, 10), amount: '', consumption: '', label: '' })
+  const fileRef = useRef<HTMLInputElement>(null)
+  const [extracted, setExtracted] = useState('')
+  const [pdfBusy, setPdfBusy] = useState(false)
+  const [showContractForm, setShowContractForm] = useState<Energy | null>(null)
+
+  useEffect(() => { localStorage.setItem(STORAGE, JSON.stringify(data)) }, [data])
+  useEffect(() => { document.documentElement.dataset.theme = data.dark ? 'dark' : 'light' }, [data.dark])
+  const contract = (e: Energy) => data.contracts.find(c => c.energy === e) || defaultData.contracts.find(c => c.energy === e)!
+  const updateContract = (e: Energy, patch: Partial<Contract>) => setData(d => ({ ...d, contracts: d.contracts.map(c => c.energy === e ? { ...c, ...patch, updated: new Date().toISOString().slice(0, 10) } : c) }))
+  const notify = (s: string) => { setToast(s); window.setTimeout(() => setToast(''), 2800) }
+  const priceFor = (e: Energy) => {
+    const c = contract(e)
+    return calcPrice.trim() && energy === e ? Number(calcPrice.replace(',', '.')) : c.price
+  }
+  const monthly = useMemo(() => data.appliances.reduce((sum, a) => {
+    const c = contract(a.energy)
+    const kwh = a.energy === 'electricity' ? a.watts / 1000 * a.hours * a.days : a.watts / 1000 * a.hours * a.days
+    return sum + kwh * c.price
+  }, 0), [data])
+  const totals = useMemo(() => ({
+    electricity: data.bills.filter(b => b.energy === 'electricity').reduce((s, b) => s + b.amount, 0),
+    gas: data.bills.filter(b => b.energy === 'gas').reduce((s, b) => s + b.amount, 0),
+  }), [data.bills])
+  const calcKwh = calcWatts / 1000 * calcHours * calcDays
+  const calcCost = calcKwh * priceFor(energy)
+  const gasKwh = calcGasM3 * calcCoefficient
+  const gasCost = gasKwh * contract('gas').price
+
+  async function importPdf(file?: File) {
+    if (!file) return
+    if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) { notify('Sélectionnez un fichier PDF.'); return }
+    setPdfBusy(true); setExtracted('')
+    try {
+      const bytes = await file.arrayBuffer()
+      const pdf = await pdfjsLib.getDocument({ data: bytes }).promise
+      let text = ''
+      for (let i = 1; i <= Math.min(pdf.numPages, 12); i++) {
+        const page = await pdf.getPage(i)
+        const content = await page.getTextContent()
+        text += content.items.map((item: any) => item.str || '').join(' ') + '\n'
+      }
+      setExtracted(text.trim() || 'Aucun texte exploitable trouvé. Le document est peut-être un scan : saisissez les valeurs manuellement.')
+      const lower = text.toLowerCase()
+      const foundPrice = text.match(/(\d+[,.]\d{2,4})\s*€?\s*(?:\/\s*kwh|€\s*\/\s*kwh|par\s*kwh)/i)
+      const foundAmount = text.match(/(?:total\s*(?:ttc)?|montant\s*(?:total)?)[^\d]{0,30}(\d{1,4}[,.]\d{2})/i)
+      const guessedEnergy: Energy = /gaz|m3|m³/i.test(lower) && !/électricité/i.test(lower) ? 'gas' : 'electricity'
+      setBillDraft(v => ({ ...v, energy: guessedEnergy, label: file.name, amount: foundAmount?.[1]?.replace(',', '.') || v.amount }))
+      if (foundPrice) {
+        const p = Number(foundPrice[1].replace(',', '.'))
+        if (p > 0 && p < 5) updateContract(guessedEnergy, { price: p })
+      }
+      notify('PDF lu localement. Vérifiez les données extraites.')
+    } catch (err) {
+      setExtracted('Lecture impossible. Vous pouvez tout de même saisir les données de la facture manuellement.')
+      notify('Impossible de lire ce PDF.')
+    } finally { setPdfBusy(false); if (fileRef.current) fileRef.current.value = '' }
+  }
+
+  const addBill = () => {
+    const amount = Number(billDraft.amount.replace(',', '.'))
+    const consumption = Number(billDraft.consumption.replace(',', '.'))
+    if (!billDraft.amount || amount < 0 || !billDraft.consumption || consumption < 0) { notify('Renseignez un montant et une consommation valides.'); return }
+    setData(d => ({ ...d, bills: [{ id: uid(), energy: billDraft.energy, date: billDraft.date, amount, consumption, label: billDraft.label || 'Facture' }, ...d.bills] }))
+    setBillDraft(v => ({ ...v, amount: '', consumption: '', label: '' })); setExtracted(''); notify('Facture ajoutée à votre historique.')
+  }
+  const exportData = () => {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'watts-sauvegarde.json'; a.click(); URL.revokeObjectURL(url)
+  }
+  const importBackup = async (file?: File) => {
+    if (!file) return
+    try { const parsed = JSON.parse(await file.text()); if (!parsed.contracts || !parsed.appliances) throw new Error(); setData({ ...defaultData, ...parsed }); notify('Sauvegarde restaurée.') } catch { notify('Fichier de sauvegarde invalide.') }
+  }
+  const addAppliance = () => setEditing({ id: uid(), name: '', category: 'Autre', energy: 'electricity', watts: 500, hours: 1, days: 30, note: '' })
+  const saveAppliance = () => {
+    if (!editing || !editing.name.trim() || editing.watts <= 0) { notify('Indiquez un nom et une puissance valides.'); return }
+    setData(d => ({ ...d, appliances: d.appliances.some(a => a.id === editing.id) ? d.appliances.map(a => a.id === editing.id ? editing : a) : [...d.appliances, editing] }))
+    setEditing(null); notify('Appareil enregistré.')
+  }
+  const nav = (id: string) => { setPage(id); window.scrollTo({ top: 0, behavior: 'smooth' }) }
+  const appCost = (a: Appliance) => a.watts / 1000 * a.hours * a.days * contract(a.energy).price
+  const selectedA = data.appliances.find(a => a.name === compareA) || data.appliances[0]
+  const selectedB = data.appliances.find(a => a.name === compareB) || data.appliances[1] || data.appliances[0]
+  const lessons = [
+    { title: 'Watt et kilowatt : la puissance', tag: 'Les bases', body: 'Le watt (W) mesure une puissance : c’est le rythme auquel un appareil utilise de l’énergie lorsqu’il fonctionne. 1 000 watts = 1 kilowatt (kW). Un radiateur de 2 000 W a une puissance de 2 kW.', example: 'Imaginez un robinet : la puissance ressemble au débit instantané.' },
+    { title: 'Le kilowattheure : l’énergie consommée', tag: 'Les bases', body: 'Le kilowattheure (kWh) mesure une quantité d’énergie. Pour un appareil dont la puissance est constante : puissance en kW × durée en heures = énergie en kWh.', example: 'Un appareil de 1 kW utilisé pendant 2 heures consomme 2 kWh.' },
+    { title: 'Pourquoi la facture est en kWh ?', tag: 'Facture', body: 'Le compteur mesure l’énergie consommée. Le fournisseur applique le prix du kWh, puis ajoute notamment l’abonnement et les taxes ou contributions applicables.', example: '100 kWh × 0,20 € = 20 € de part variable, avant abonnement.' },
+    { title: 'Comprendre l’abonnement', tag: 'Facture', body: 'L’abonnement est une part fixe facturée même si vous ne consommez presque rien. Il dépend notamment de l’offre et, en électricité, de la puissance souscrite.', example: 'Un abonnement de 15 € par mois représente 180 € sur douze mois.' },
+    { title: 'Heures pleines et heures creuses', tag: 'Tarifs', body: 'Certaines offres proposent deux prix du kWh selon les plages horaires définies pour le point de livraison. Il faut connaître la répartition réelle de vos consommations pour savoir si l’option est intéressante.', example: 'Déplacer un chauffe-eau en heures creuses peut réduire son coût si le tarif et le pilotage s’y prêtent.' },
+    { title: 'Le gaz : du m³ au kWh', tag: 'Gaz', body: 'Le compteur de gaz mesure un volume en mètres cubes. La facture convertit ce volume en énergie grâce à un coefficient indiqué par le distributeur. Ce coefficient varie selon le gaz et les conditions de distribution.', example: '10 m³ × coefficient 11,2 = 112 kWh. Utilisez toujours le coefficient de votre facture.' },
+    { title: 'Puissance et consommation réelle', tag: 'Appareils', body: 'La puissance affichée est souvent une puissance maximale ou nominale. Un appareil ne fonctionne pas nécessairement à cette puissance pendant toute sa durée d’utilisation : thermostat, cycles et modes éco changent la consommation réelle.', example: 'Un radiateur thermostatique alterne souvent les périodes de chauffe et d’arrêt.' },
+    { title: 'Lire une facture', tag: 'Facture', body: 'Repérez la période, l’index ou la consommation, le prix unitaire, l’abonnement, les taxes, les éventuelles régularisations et le total TTC. Comparez des périodes de durée similaire.', example: 'Une facture élevée peut venir d’un hiver plus froid, d’un prix différent ou d’une régularisation.' },
+    { title: 'Les appareils en veille', tag: 'Économies', body: 'Une veille consomme peu en puissance mais peut durer 24 h sur 24. Pour l’estimer : watts ÷ 1 000 × heures × jours × prix du kWh.', example: 'Une veille de 5 W pendant 24 h et 365 jours représente 43,8 kWh par an.' },
+    { title: 'Comparer les énergies', tag: 'Économies', body: 'Ne comparez pas seulement les prix du kWh. Il faut aussi tenir compte du rendement de l’équipement, des coûts fixes, de l’entretien et de l’usage. Un kWh acheté n’est pas toujours un kWh de chaleur utile.', example: 'Un appareil de chauffage transforme l’énergie avec un rendement qui dépend de sa technologie.' },
+  ]
+  const energyName = (e: Energy) => e === 'electricity' ? 'Électricité' : 'Gaz'
+
+  return <div className="app-shell">
+    <aside className="sidebar">
+      <button className="brand" onClick={() => nav('dashboard')}><span className="brand-mark">W</span><span>WATTS<small>MAÎTRISER SON ÉNERGIE</small></span></button>
+      <div className="side-label">ESPACE PERSONNEL</div>
+      {Object.entries(labels).map(([id, label]) => <button key={id} className={`nav-item ${page === id ? 'active' : ''}`} onClick={() => nav(id)}><span className="nav-icon">{({dashboard:'⌂',contracts:'▤',calculator:'∑',appliances:'▦',compare:'⇄',savings:'↗',learn:'✳'} as Record<string,string>)[id]}</span>{label}</button>)}
+      <div className="sidebar-bottom"><div className="privacy"><span>●</span><div><b>Vos données restent ici</b><small>Stockage sur cet appareil</small></div></div><button className="theme-toggle" onClick={() => setData(d => ({ ...d, dark: !d.dark }))}>{data.dark ? '☀ Mode clair' : '☾ Mode sombre'}</button></div>
+    </aside>
+    <main className="main">
+      <header className="topbar"><div><span className="eyebrow">VOTRE ÉNERGIE, EN CLAIR</span><h1>{labels[page]}</h1></div><div className="top-actions"><button className="icon-button" title="Exporter mes données" onClick={exportData}>⇩</button><label className="icon-button upload-backup" title="Restaurer une sauvegarde">⇧<input type="file" accept="application/json" onChange={e => importBackup(e.target.files?.[0])}/></label><div className="avatar">W</div></div></header>
+
+      {page === 'dashboard' && <div className="page-content">
+        <section className="hero"><div><span className="hero-kicker">BIENVENUE DANS WATTS</span><h2>Votre énergie mérite<br/>d’être comprise.</h2><p>Suivez vos dépenses, estimez le coût de vos appareils et découvrez où agir.</p><button className="button button-light" onClick={() => nav('calculator')}>Faire un calcul <span>→</span></button></div><div className="hero-art"><div className="orb orb-one"/><div className="orb orb-two"/><div className="hero-bolt">ϟ</div><div className="hero-caption">ÉLECTRICITÉ <i/> GAZ</div></div></section>
+        <div className="section-heading"><div><span className="eyebrow">VOTRE SITUATION</span><h2>Vue d’ensemble</h2></div><button className="text-button" onClick={() => nav('contracts')}>Gérer mes contrats →</button></div>
+        <div className="metric-grid">
+          <Metric icon="ϟ" title="Électricité" value={euro(contract('electricity').price)} unit="/ kWh" detail={contract('electricity').supplier || 'Tarif indicatif ou à personnaliser'} tone="amber"/>
+          <Metric icon="♨" title="Gaz" value={euro(contract('gas').price)} unit="/ kWh" detail={contract('gas').supplier || 'Tarif indicatif ou à personnaliser'} tone="blue"/>
+          <Metric icon="▤" title="Factures importées" value={String(data.bills.length)} unit=" facture(s)" detail="Dans votre historique" tone="green"/>
+          <Metric icon="⌁" title="Appareils suivis" value={String(data.appliances.length)} unit=" appareils" detail="Estimations personnalisables" tone="purple"/>
+        </div>
+        <div className="dashboard-grid">
+          <section className="panel"><div className="panel-head"><div><span className="eyebrow">ESTIMATION INDICATIVE</span><h3>Coût mensuel des appareils</h3></div><span className="pill">Selon vos réglages</span></div><div className="big-number">{euro(monthly)}<small> / mois</small></div><p className="muted">Estimation variable calculée à partir de la puissance, de la durée d’usage et de vos tarifs enregistrés. Hors abonnement.</p><button className="button button-outline" onClick={() => nav('appliances')}>Voir mes appareils →</button></section>
+          <section className="panel insight"><div className="insight-icon">✦</div><span className="eyebrow">LE BON RÉFLEXE</span><h3>Un chiffre à comprendre</h3><p>Un appareil de 1 000 W utilisé pendant 1 heure consomme 1 kWh. C’est le kWh qui sert de base à la facturation de l’énergie.</p><button className="text-button" onClick={() => nav('learn')}>Découvrir les bases →</button></section>
+        </div>
+        <section className="panel quick-panel"><div className="panel-head"><div><span className="eyebrow">POUR ALLER PLUS VITE</span><h3>Que souhaitez-vous faire ?</h3></div></div><div className="quick-grid"><Quick icon="∑" title="Calculer un coût" text="Estimer une consommation" onClick={() => nav('calculator')}/><Quick icon="▤" title="Importer une facture" text="Ajouter une facture PDF" onClick={() => nav('contracts')}/><Quick icon="⇄" title="Comparer" text="Deux appareils ou usages" onClick={() => nav('compare')}/><Quick icon="✳" title="Apprendre" text="Comprendre les notions" onClick={() => nav('learn')}/></div></section>
+      </div>}
+
+      {page === 'contracts' && <div className="page-content">
+        <div className="intro-row"><p className="muted">Enregistrez vos tarifs et abonnements pour obtenir des estimations plus proches de votre contrat. Les valeurs sont modifiables à tout moment.</p><button className="button button-primary" onClick={() => fileRef.current?.click()}>＋ Importer une facture PDF</button><input ref={fileRef} hidden type="file" accept="application/pdf,.pdf" onChange={e => importPdf(e.target.files?.[0])}/></div>
+        {pdfBusy && <div className="notice">Lecture du PDF en cours, directement dans votre navigateur…</div>}
+        {extracted && <section className="panel"><div className="panel-head"><h3>Texte extrait du PDF</h3><button className="text-button" onClick={() => setExtracted('')}>Fermer</button></div><p className="muted small">Vérifiez les informations : l’extraction est indicative et peut être incomplète.</p><pre className="extracted">{extracted.slice(0, 6000)}</pre></section>}
+        <div className="contract-grid">{(['electricity','gas'] as Energy[]).map(e => <ContractCard key={e} energy={e} contract={contract(e)} onEdit={patch => updateContract(e, patch)} onReset={() => setShowContractForm(e)}/>)}</div>
+        {showContractForm && <ContractEditor energy={showContractForm} value={contract(showContractForm)} onSave={patch => { updateContract(showContractForm, patch); setShowContractForm(null); notify('Contrat mis à jour.') }} onClose={() => setShowContractForm(null)}/>}
+        <section className="panel"><div className="panel-head"><div><span className="eyebrow">SUIVI DANS LE TEMPS</span><h3>Mon historique de factures</h3></div><span className="pill">{data.bills.length} entrée(s)</span></div>
+          <div className="bill-form">
+            <select value={billDraft.energy} onChange={e => setBillDraft(v => ({...v, energy:e.target.value as Energy}))}><option value="electricity">Électricité</option><option value="gas">Gaz</option></select>
+            <input type="date" value={billDraft.date} onChange={e => setBillDraft(v => ({...v,date:e.target.value}))}/>
+            <input placeholder="Montant TTC (€)" value={billDraft.amount} onChange={e => setBillDraft(v => ({...v,amount:e.target.value}))}/>
+            <input placeholder="Consommation (kWh)" value={billDraft.consumption} onChange={e => setBillDraft(v => ({...v,consumption:e.target.value}))}/>
+            <input placeholder="Libellé / fournisseur" value={billDraft.label} onChange={e => setBillDraft(v => ({...v,label:e.target.value}))}/>
+            <button className="button button-primary" onClick={addBill}>Ajouter</button>
+          </div>
+          {data.bills.length === 0 ? <Empty text="Aucune facture enregistrée. Importez un PDF ou saisissez les chiffres de votre facture ci-dessus."/ > : <div className="table-wrap"><table><thead><tr><th>Date</th><th>Énergie</th><th>Libellé</th><th>Consommation</th><th>Montant</th><th/></tr></thead><tbody>{data.bills.map(b => <tr key={b.id}><td>{new Date(b.date+'T12:00:00').toLocaleDateString('fr-FR')}</td><td><span className={`energy-dot ${b.energy}`}/>{energyName(b.energy)}</td><td>{b.label}</td><td>{num(b.consumption)} kWh</td><td><b>{euro(b.amount)}</b></td><td><button className="delete-button" onClick={() => setData(d => ({...d,bills:d.bills.filter(x=>x.id!==b.id)}))}>×</button></td></tr>)}</tbody></table></div>}
+        </section>
+        <section className="panel privacy-panel"><span className="privacy-symbol">▣</span><div><b>Vos documents restent privés</b><p className="muted">Le PDF est lu dans votre navigateur. Il n’est pas envoyé à un serveur. Seules les données que vous validez sont conservées dans le stockage local de cet appareil.</p></div></section>
+      </div>}
+
+      {page === 'calculator' && <div className="page-content">
+        <div className="segmented"><button className={energy==='electricity'?'selected':''} onClick={()=>setEnergy('electricity')}>ϟ Électricité</button><button className={energy==='gas'?'selected':''} onClick={()=>setEnergy('gas')}>♨ Gaz</button></div>
+        {energy === 'electricity' ? <div className="calculator-layout"><section className="panel calculator-panel"><span className="eyebrow">CALCULATEUR ÉLECTRIQUE</span><h2>Que consomme votre appareil ?</h2><p className="muted">Renseignez sa puissance et son temps de fonctionnement.</p><Field label="Puissance de l’appareil" value={String(calcWatts)} suffix="W" onChange={v=>setCalcWatts(Math.max(0,Number(v)||0))}/><Range label="Heures d’utilisation par jour" value={calcHours} min={0.25} max={24} step={0.25} onChange={setCalcHours}/><Range label="Nombre de jours" value={calcDays} min={1} max={365} step={1} onChange={setCalcDays}/><Field label="Prix du kWh TTC (facultatif)" value={calcPrice} suffix="€/kWh" placeholder={num(contract(energy).price)} onChange={setCalcPrice}/><p className="hint">Par défaut, WATTS utilise le tarif de votre contrat ({num(contract(energy).price)} €/kWh).</p></section><ResultCard kwh={calcKwh} cost={calcCost} daily={calcCost/calcDays} title="Résultat de votre estimation" note="Hypothèse : puissance constante pendant toute la durée indiquée. Pour les appareils à cycles ou thermostat, le résultat peut surestimer la consommation réelle."/></div> :
+        <div className="calculator-layout"><section className="panel calculator-panel"><span className="eyebrow">CALCULATEUR GAZ</span><h2>Du compteur à votre facture</h2><p className="muted">Le compteur mesure un volume en m³. La facture le convertit en kWh.</p><Field label="Volume consommé" value={String(calcGasM3)} suffix="m³" onChange={v=>setCalcGasM3(Math.max(0,Number(v)||0))}/><Field label="Coefficient de conversion" value={String(calcCoefficient)} suffix="kWh/m³" onChange={v=>setCalcCoefficient(Math.max(0,Number(v)||0))}/><p className="hint">Coefficient indicatif par défaut : 11,2. Remplacez-le par celui de votre facture.</p><Field label="Prix du kWh gaz TTC" value={String(contract('gas').price)} suffix="€/kWh" onChange={v=>updateContract('gas',{price:Math.max(0,Number(v)||0)})}/></section><ResultCard kwh={gasKwh} cost={gasCost} daily={gasCost} title="Votre consommation de gaz" note="Estimation de la part variable uniquement, hors abonnement. Le coefficient exact figure sur votre facture."/></div>}
+        <section className="learning-callout"><div className="callout-icon">?</div><div><b>Pourquoi le résultat est en kWh ?</b><p>Le kWh est l’unité utilisée pour facturer l’énergie, aussi bien pour l’électricité que pour le gaz. <button className="inline-link" onClick={()=>nav('learn')}>Comprendre les unités →</button></p></div></section>
+      </div>}
+
+      {page === 'appliances' && <div className="page-content">
+        <div className="section-heading"><div><span className="eyebrow">VOTRE ÉQUIPEMENT</span><h2>La bibliothèque des appareils</h2><p className="muted">Des puissances indicatives à adapter à vos équipements réels.</p></div><button className="button button-primary" onClick={addAppliance}>＋ Ajouter un appareil</button></div>
+        <div className="filter-row"><button className={filter==='all'?'filter active-filter':''} onClick={()=>setFilter('all')}>Tous</button><button className={filter==='electricity'?'filter active-filter':''} onClick={()=>setFilter('electricity')}>ϟ Électricité</button><button className={filter==='gas'?'filter active-filter':''} onClick={()=>setFilter('gas')}>♨ Gaz</button></div>
+        <div className="appliance-grid">{data.appliances.filter(a=>filter==='all'||a.energy===filter).map(a=><div className="appliance-card" key={a.id}><div className="appliance-top"><span className={`appliance-symbol ${a.energy}`}>{a.energy==='electricity'?'ϟ':'♨'}</span><span className="pill">{a.category}</span><button className="more-button" onClick={()=>setEditing(a)}>···</button></div><h3>{a.name}</h3><div className="appliance-watts">{num(a.watts)} <small>W</small></div><p className="muted small">{num(a.hours)} h/jour · {a.days} jours/mois</p><div className="appliance-cost"><span>Coût estimé / mois</span><b>{euro(appCost(a))}</b></div>{a.note && <p className="hint">{a.note}</p>}<button className="text-button" onClick={()=>setEditing(a)}>Modifier les paramètres →</button></div>)}</div>
+        {editing && <ApplianceEditor value={editing} onChange={setEditing} onSave={saveAppliance} onDelete={()=>{setData(d=>({...d,appliances:d.appliances.filter(a=>a.id!==editing.id)}));setEditing(null);notify('Appareil supprimé.')}} onClose={()=>setEditing(null)} isNew={!data.appliances.some(a=>a.id===editing.id)}/>}
+      </div>}
+
+      {page === 'compare' && <div className="page-content"><div className="section-heading"><div><span className="eyebrow">METTRE EN PERSPECTIVE</span><h2>Comparer deux appareils</h2><p className="muted">Comparez leurs coûts estimés avec vos tarifs enregistrés.</p></div></div><section className="panel compare-panel"><div className="compare-selects"><label>Premier appareil<select value={compareA} onChange={e=>setCompareA(e.target.value)}>{data.appliances.map(a=><option key={a.id}>{a.name}</option>)}</select></label><div className="versus">VS</div><label>Second appareil<select value={compareB} onChange={e=>setCompareB(e.target.value)}>{data.appliances.map(a=><option key={a.id}>{a.name}</option>)}</select></label></div><div className="compare-results">{[selectedA,selectedB].map((a,i)=><div className="compare-result" key={a.id}><span className={`appliance-symbol ${a.energy}`}>{a.energy==='electricity'?'ϟ':'♨'}</span><h3>{a.name}</h3><div className="compare-price">{euro(appCost(a))}<small> / mois</small></div><p className="muted small">{num(a.watts)} W · {num(a.hours)} h/jour</p><div className="bar-track"><div className={`bar-fill bar-${i}`} style={{width:`${Math.max(3,appCost(a)/Math.max(appCost(selectedA),appCost(selectedB),0.01)*100)}%`}}/></div></div>)}</div><p className="hint">Les appareils peuvent avoir des usages et des énergies différents. Les résultats ne sont comparables que si les hypothèses d’utilisation sont pertinentes.</p></section></div>}
+
+      {page === 'savings' && <div className="page-content"><div className="section-heading"><div><span className="eyebrow">SIMULER UN CHANGEMENT</span><h2>Et si vous changiez vos habitudes ?</h2><p className="muted">Estimez l’effet d’une réduction du temps d’utilisation d’un appareil.</p></div></div><Savings appliances={data.appliances} price={e=>contract(e).price}/><section className="panel"><span className="eyebrow">QUELQUES REPÈRES</span><h3>Les économies commencent par la mesure</h3><div className="tip-grid"><Tip title="Repérer les veilles" text="Une faible puissance permanente peut finir par représenter une consommation annuelle non négligeable."/><Tip title="Adapter la température" text="Le chauffage est souvent un poste important. Une baisse modérée de consigne peut réduire les besoins, selon le logement."/><Tip title="Comparer les cycles" text="Pour le lave-linge et le sèche-linge, regardez les kWh par cycle indiqués par le fabricant ou l’étiquette énergie."/></div></section></div>}
+
+      {page === 'learn' && <div className="page-content"><div className="section-heading"><div><span className="eyebrow">APPRENDRE À SON RYTHME</span><h2>L’énergie en clair</h2><p className="muted">Des explications courtes, avec des exemples concrets.</p></div><span className="pill">10 mini-leçons</span></div><div className="learn-layout"><nav className="lesson-list">{lessons.map((l,i)=><button key={l.title} className={lesson===i?'lesson-active':''} onClick={()=>setLesson(i)}><span>{String(i+1).padStart(2,'0')}</span><div><small>{l.tag}</small><b>{l.title}</b></div><i>→</i></button>)}</nav><article className="panel lesson-content"><span className="eyebrow">LEÇON {String(lesson+1).padStart(2,'0')} / 10</span><h2>{lessons[lesson].title}</h2><p>{lessons[lesson].body}</p><div className="example-box"><span>✦ EXEMPLE CONCRET</span><b>{lessons[lesson].example}</b></div><div className="lesson-controls"><button className="button button-outline" disabled={lesson===0} onClick={()=>setLesson(v=>v-1)}>← Précédent</button><button className="button button-primary" onClick={()=>setLesson(v=>(v+1)%lessons.length)}>{lesson===lessons.length-1?'Recommencer':'Leçon suivante'} →</button></div></article></div></div>}
+      <footer className="footer"><span>WATTS <b>·</b> Comprendre. Calculer. Économiser.</span><span>Vos données restent sur votre appareil.</span></footer>
+    </main>
+    {toast && <div className="toast">{toast}</div>}
+  </div>
+}
+
+function Metric({icon,title,value,unit,detail,tone}:{icon:string;title:string;value:string;unit:string;detail:string;tone:string}) { return <div className="metric-card"><div className={`metric-icon ${tone}`}>{icon}</div><span>{title}</span><div className="metric-value">{value}<small>{unit}</small></div><p>{detail}</p></div> }
+function Quick({icon,title,text,onClick}:{icon:string;title:string;text:string;onClick:()=>void}) { return <button className="quick-item" onClick={onClick}><span>{icon}</span><div><b>{title}</b><small>{text}</small></div><i>→</i></button> }
+function Empty({text}:{text:string}) { return <div className="empty-state"><span>▤</span><p>{text}</p></div> }
+function Field({label,value,suffix,onChange,placeholder}:{label:string;value:string;suffix:string;onChange:(v:string)=>void;placeholder?:string}) { return <label className="field"><span>{label}</span><div><input value={value} placeholder={placeholder} onChange={e=>onChange(e.target.value)} inputMode="decimal"/><small>{suffix}</small></div></label> }
+function Range({label,value,min,max,step,onChange}:{label:string;value:number;min:number;max:number;step:number;onChange:(n:number)=>void}) { return <label className="range-field"><span>{label}<b>{num(value)}</b></span><input type="range" min={min} max={max} step={step} value={value} onChange={e=>onChange(Number(e.target.value))}/></label> }
+function ResultCard({kwh,cost,daily,title,note}:{kwh:number;cost:number;daily:number;title:string;note:string}) { return <section className="result-card"><span className="result-icon">ϟ</span><span className="eyebrow">{title}</span><div className="result-main">{num(kwh)} <small>kWh</small></div><div className="result-label">Énergie estimée</div><div className="result-cost">{euro(cost)}</div><div className="result-label">Coût variable estimé</div><div className="result-divider"/><div className="result-row"><span>Coût moyen par jour</span><b>{euro(daily)}</b></div><p>{note}</p></section> }
+function ContractCard({energy,contract,onEdit,onReset}:{energy:Energy;contract:Contract;onEdit:(p:Partial<Contract>)=>void;onReset:()=>void}) { return <section className="panel contract-card"><div className="contract-heading"><span className={`appliance-symbol ${energy}`}>{energy==='electricity'?'ϟ':'♨'}</span><div><span className="eyebrow">MON CONTRAT</span><h3>{energy==='electricity'?'Électricité':'Gaz'}</h3></div><span className="pill">TTC</span></div><label className="field"><span>Fournisseur</span><input value={contract.supplier} placeholder="Ex. fournisseur d’énergie" onChange={e=>onEdit({supplier:e.target.value})}/></label><label className="field"><span>Nom de l’offre</span><input value={contract.offer} placeholder="Nom de votre offre" onChange={e=>onEdit({offer:e.target.value})}/></label><div className="contract-fields"><Field label="Prix du kWh" value={String(contract.price)} suffix="€" onChange={v=>onEdit({price:Math.max(0,Number(v)||0)})}/><Field label="Abonnement mensuel" value={String(contract.subscription)} suffix="€" onChange={v=>onEdit({subscription:Math.max(0,Number(v)||0)})}/></div>{energy==='electricity' ? <><label className="check-field"><input type="checkbox" checked={contract.hpHc} onChange={e=>onEdit({hpHc:e.target.checked})}/> Mon offre comporte des heures pleines / heures creuses</label>{contract.hpHc && <div className="contract-fields"><Field label="Prix heures pleines" value={String(contract.hpPrice)} suffix="€/kWh" onChange={v=>onEdit({hpPrice:Math.max(0,Number(v)||0)})}/><Field label="Prix heures creuses" value={String(contract.hcPrice)} suffix="€/kWh" onChange={v=>onEdit({hcPrice:Math.max(0,Number(v)||0)})}/></div>}<label className="field"><span>Puissance souscrite</span><select value={contract.power} onChange={e=>onEdit({power:e.target.value})}>{['3 kVA','6 kVA','9 kVA','12 kVA','15 kVA','18 kVA','Autre'].map(x=><option>{x}</option>)}</select></label></> : <Field label="Coefficient de conversion" value={String(contract.gasCoefficient)} suffix="kWh/m³" onChange={v=>onEdit({gasCoefficient:Math.max(0,Number(v)||0)})}/>}<div className="contract-foot"><span>Modifié : {contract.updated || 'Pas encore renseigné'}</span><button className="text-button" onClick={onReset}>Modifier les détails →</button></div></section> }
+function ContractEditor({energy,value,onSave,onClose}:{energy:Energy;value:Contract;onSave:(p:Partial<Contract>)=>void;onClose:()=>void}) { const [v,setV]=useState(value); return <div className="modal-backdrop"><div className="modal"><div className="modal-head"><div><span className="eyebrow">PARAMÈTRES DU CONTRAT</span><h2>{energy==='electricity'?'Électricité':'Gaz'}</h2></div><button className="delete-button" onClick={onClose}>×</button></div><p className="muted">Renseignez les informations telles qu’elles apparaissent sur votre facture ou votre espace client.</p><div className="form-grid"><Field label="Prix du kWh TTC" value={String(v.price)} suffix="€" onChange={x=>setV(s=>({...s,price:Number(x)||0}))}/><Field label="Abonnement mensuel TTC" value={String(v.subscription)} suffix="€" onChange={x=>setV(s=>({...s,subscription:Number(x)||0}))}/>{energy==='gas'&&<Field label="Coefficient m³ → kWh" value={String(v.gasCoefficient)} suffix="kWh/m³" onChange={x=>setV(s=>({...s,gasCoefficient:Number(x)||0}))}/>}</div><div className="modal-actions"><button className="button button-outline" onClick={onClose}>Annuler</button><button className="button button-primary" onClick={()=>onSave(v)}>Enregistrer</button></div></div></div> }
+function ApplianceEditor({value,onChange,onSave,onDelete,onClose,isNew}:{value:Appliance;onChange:(v:Appliance)=>void;onSave:()=>void;onDelete:()=>void;onClose:()=>void;isNew:boolean}) { const set=(p:Partial<Appliance>)=>onChange({...value,...p}); return <div className="modal-backdrop"><div className="modal"><div className="modal-head"><div><span className="eyebrow">VOTRE ÉQUIPEMENT</span><h2>{isNew?'Ajouter un appareil':'Modifier un appareil'}</h2></div><button className="delete-button" onClick={onClose}>×</button></div><div className="form-grid"><label className="field full"><span>Nom de l’appareil</span><input value={value.name} onChange={e=>set({name:e.target.value})}/></label><label className="field"><span>Énergie</span><select value={value.energy} onChange={e=>set({energy:e.target.value as Energy})}><option value="electricity">Électricité</option><option value="gas">Gaz</option></select></label><label className="field"><span>Catégorie</span><input value={value.category} onChange={e=>set({category:e.target.value})}/></label><Field label="Puissance" value={String(value.watts)} suffix="W" onChange={v=>set({watts:Number(v)||0})}/><Field label="Heures par jour" value={String(value.hours)} suffix="h" onChange={v=>set({hours:Number(v)||0})}/><Field label="Jours par mois" value={String(value.days)} suffix="j" onChange={v=>set({days:Number(v)||0})}/><label className="field full"><span>Note pédagogique</span><textarea value={value.note} onChange={e=>set({note:e.target.value})}/></label></div><div className="modal-actions">{!isNew&&<button className="button button-danger" onClick={onDelete}>Supprimer</button>}<span/><button className="button button-outline" onClick={onClose}>Annuler</button><button className="button button-primary" onClick={onSave}>Enregistrer</button></div></div></div> }
+function Savings({appliances,price}:{appliances:Appliance[];price:(e:Energy)=>number}) { const [id,setId]=useState(appliances[0]?.id||''); const [reduction,setReduction]=useState(20); const a=appliances.find(x=>x.id===id)||appliances[0]; if(!a)return <Empty text="Ajoutez un appareil pour lancer une simulation."/>; const before=a.watts/1000*a.hours*a.days*price(a.energy); const saved=before*reduction/100; return <section className="panel savings-panel"><label className="field"><span>Choisir un appareil</span><select value={id} onChange={e=>setId(e.target.value)}>{appliances.map(x=><option value={x.id}>{x.name}</option>)}</select></label><Range label="Réduire le temps d’utilisation de" value={reduction} min={0} max={90} step={5} onChange={setReduction}/><div className="savings-results"><div><span>Coût estimé actuel</span><b>{euro(before)}<small>/mois</small></b></div><div><span>Économie estimée</span><b className="saving-green">{euro(saved)}<small>/mois</small></b></div><div><span>Économie annuelle</span><b className="saving-green">{euro(saved*12)}</b></div></div><div className="saving-message">En réduisant de {reduction}% le temps d’utilisation de <b>{a.name}</b>, vous pourriez économiser environ <b>{euro(saved*12)} par an</b>, selon les hypothèses saisies.</div><p className="hint">Simulation théorique : elle suppose une baisse proportionnelle de la consommation. Elle ne prédit pas les économies réelles d’un logement.</p></section> }
+function Tip({title,text}:{title:string;text:string}) { return <div className="tip"><span>✦</span><div><b>{title}</b><p>{text}</p></div></div> }

@@ -1,0 +1,11 @@
+{
+  "name": "WATTS — Comprendre son énergie",
+  "short_name": "WATTS",
+  "description": "Comprendre et maîtriser ses dépenses énergétiques.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f4f7fa",
+  "theme_color": "#102a43",
+  "icons": []
+}
