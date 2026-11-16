@@ -13,3 +13,6 @@
 
 /* Module Eau */
 .water-chart{display:grid;gap:10px;margin:18px 0 8px}.water-bar-row{display:grid;grid-template-columns:82px minmax(80px,1fr) 72px;gap:12px;align-items:center;font-size:11px}.water-bar-row>span{color:var(--muted)}.water-bar-row>b{text-align:right;font-variant-numeric:tabular-nums}.water-track{height:13px;border-radius:20px;background:var(--line);overflow:hidden}.water-fill{height:100%;border-radius:20px;background:linear-gradient(90deg,#3296b6,#58b9c0)}.water-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:24px}.water-summary>div{padding:14px;background:var(--bg);border-radius:10px}.water-summary small,.water-summary b{display:block}.water-summary small{font-size:10px;color:var(--muted)}.water-summary b{font:800 18px Manrope;margin-top:7px}@media(max-width:600px){.water-summary{grid-template-columns:1fr}.water-bar-row{grid-template-columns:64px minmax(60px,1fr) 62px;gap:7px;font-size:10px}}
+
+/* Champs éditables de l'historique de l'eau */
+.table-input{width:100%;min-width:92px;max-width:125px;padding:7px 8px;border:1px solid var(--line,#d9dee7);border-radius:8px;background:var(--surface,#fff);color:inherit;font:inherit;font-size:.9rem}
