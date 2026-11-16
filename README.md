@@ -50,3 +50,11 @@ Le build TypeScript/Vite constitue le contrôle technique principal. Vérifiez s
 
 ## Option Tempo
 Saisie des six tarifs Tempo (bleu/blanc/rouge, heures pleines/creuses). La couleur du jour est récupérée via l’API publique Calendrier Tempo, qui relaie les données publiées par RTE. En cas d’indisponibilité, elle reste sélectionnable manuellement. Vérifiez les tarifs sur votre facture.
+
+
+## WATTS 1.2 — améliorations factures
+- Le champ d'abonnement accepte désormais les décimales avec une virgule.
+- L'import PDF tente d'extraire localement le montant TTC, la consommation, la date et la période de facturation.
+- Les données détectées sont reportées dans le formulaire pour vérification et correction avant validation.
+- Le PDF est archivé localement dans IndexedDB et peut être rouvert depuis la bibliothèque.
+- Les factures scannées (images) ne sont pas reconnues par OCR : les champs doivent alors être complétés manuellement.
